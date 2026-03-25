@@ -156,6 +156,8 @@ def init_state():
         st.session_state.final_roasted_weight = 0.0
     if "final_total_roast_time" not in st.session_state:
         st.session_state.final_total_roast_time = ""
+    if "end_confirm_prev_running" not in st.session_state:
+        st.session_state.end_confirm_prev_running = False
 
 # Get elapsed seconds since roast start, or 0 if not started
 def current_elapsed_sec() -> float:
@@ -440,6 +442,7 @@ def main():
         st.session_state.disabled_point_ids = []
         st.session_state.final_roasted_weight = 0.0
         st.session_state.final_total_roast_time = ""
+        st.session_state.end_confirm_prev_running = False
         st.session_state.roast_id = None
         st.rerun()
 
@@ -476,6 +479,7 @@ def main():
         st.session_state.disabled_point_ids = []
         st.session_state.final_roasted_weight = 0.0
         st.session_state.final_total_roast_time = ""
+        st.session_state.end_confirm_prev_running = False
 
         # Add initial point at x=0 with set temp (as you wanted)
         init_result = st.session_state.classifier.force_initial(set_temp=new_set_temp)
@@ -489,11 +493,15 @@ def main():
         st.rerun()
 
     if end_roast_btn:
+        st.session_state.end_confirm_prev_running = bool(st.session_state.running)
+        st.session_state.running = False
+        st.session_state.final_total_roast_time = _format_mmss(current_elapsed_sec())
         st.session_state.end_confirm_pending = True
         st.rerun()
 
     if st.session_state.end_confirm_pending:
         st.sidebar.error("Confirm end roast? This will autosave and close camera.")
+        st.sidebar.caption(f"Total roast time (captured now): {st.session_state.final_total_roast_time}")
         st.session_state.final_roasted_weight = st.sidebar.number_input(
             "Roasted weight (g)",
             min_value=0.0,
@@ -501,11 +509,18 @@ def main():
             step=0.1,
             key="final_roasted_weight_input",
         )
-        st.session_state.final_total_roast_time = st.sidebar.text_input(
-            "Total roast time (mm:ss)",
-            value=st.session_state.final_total_roast_time,
-            key="final_total_roast_time_input",
-        )
+        raw_w = float(raw_weight)
+        roasted_w = float(st.session_state.final_roasted_weight)
+        if raw_w > 0 and roasted_w > 0:
+            loss_g = raw_w - roasted_w
+            loss_pct = (loss_g / raw_w) * 100.0
+            if loss_g >= 0:
+                st.sidebar.info(f"Weight loss: {loss_g:.1f} g ({loss_pct:.1f}%)")
+            else:
+                st.sidebar.warning(
+                    f"Roasted weight is {abs(loss_g):.1f} g above raw ({abs(loss_pct):.1f}% gain). Check entries."
+                )
+        st.sidebar.caption("Roasted weight can be recorded later; 0 means not recorded yet.")
 
         end_col_a, end_col_b = st.sidebar.columns(2)
         confirm_end_yes = end_col_a.button("Yes, end", type="primary")
@@ -513,14 +528,14 @@ def main():
 
         if confirm_end_no:
             st.session_state.end_confirm_pending = False
+            st.session_state.running = bool(st.session_state.end_confirm_prev_running and st.session_state.roast_active)
+            st.session_state.end_confirm_prev_running = False
             st.rerun()
 
         if confirm_end_yes:
             final_errors = []
-            if float(st.session_state.final_roasted_weight) <= 0:
-                final_errors.append("Roasted weight must be greater than 0")
-            if not _valid_mmss(st.session_state.final_total_roast_time):
-                final_errors.append("Total roast time must be in mm:ss format")
+            if not st.session_state.final_total_roast_time:
+                final_errors.append("Total roast time could not be captured")
 
             if final_errors:
                 st.sidebar.error("Cannot end roast yet:")
@@ -552,6 +567,7 @@ def main():
                 st.session_state.running = False
                 st.session_state.roast_active = False
                 st.session_state.end_confirm_pending = False
+                st.session_state.end_confirm_prev_running = False
                 if st.session_state.camera:
                     st.session_state.camera.close()
                     st.session_state.camera = None
@@ -560,7 +576,14 @@ def main():
                     st.session_state.preview_camera = None
                     st.session_state.preview_cam_index = None
                     st.session_state.preview_roi = None
-                st.success(f"Saved roast: {meta.roast_id}")
+                if raw_w > 0 and roasted_w > 0:
+                    loss_g = raw_w - roasted_w
+                    loss_pct = (loss_g / raw_w) * 100.0
+                    st.success(
+                        f"Saved roast: {meta.roast_id} | Weight loss: {loss_g:.1f} g ({loss_pct:.1f}%)"
+                    )
+                else:
+                    st.success(f"Saved roast: {meta.roast_id}")
                 st.rerun()
 
     # ---- Main layout ----
@@ -753,7 +776,12 @@ def main():
     # ---- Sampling loop (run on rerun ticks) ----
     # Streamlit isn't a real-time loop; we re-run the script.
     # We'll "tick" by sleeping a tiny bit when running.
-    if st.session_state.running and st.session_state.roast_active and st.session_state.camera is not None:
+    if (
+        st.session_state.running
+        and st.session_state.roast_active
+        and (not st.session_state.end_confirm_pending)
+        and st.session_state.camera is not None
+    ):
         now = time.time()
         elapsed = current_elapsed_sec()
 
