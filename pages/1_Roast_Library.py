@@ -4,7 +4,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from storage import list_roasts, load_roast_meta, load_roast_curve, list_roasts_for_bean
+from storage import list_roasts, load_roast_meta, load_roast_curve, list_roasts_for_bean, update_roast_notes
 
 
 st.set_page_config(page_title="Roast Library", layout="wide")
@@ -283,4 +283,49 @@ selected_roasts = st.multiselect(
 )
 
 if not selected_roasts:
-    st.info("Select at least one roast to plo
+    st.info("Select at least one roast to plot.")
+    st.stop()
+
+if len(selected_roasts) == 2:
+    left_col, right_col = st.columns(2)
+    left_id, right_id = selected_roasts
+
+    with left_col:
+        left_fig = _build_compare_figure([left_id], label_map)
+        left_fig.update_layout(title=label_map.get(left_id, left_id), showlegend=False)
+        st.plotly_chart(left_fig, use_container_width=True, config={"displayModeBar": False})
+
+    with right_col:
+        right_fig = _build_compare_figure([right_id], label_map)
+        right_fig.update_layout(title=label_map.get(right_id, right_id), showlegend=False)
+        st.plotly_chart(right_fig, use_container_width=True, config={"displayModeBar": False})
+else:
+    fig = _build_compare_figure(selected_roasts, label_map)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+if len(selected_roasts) == 1:
+    rid = selected_roasts[0]
+    st.subheader("Selected Roast Details")
+    meta = meta_map.get(rid, {})
+    cols = st.columns(4)
+    cols[0].metric("Coffee", label_map.get(rid, rid))
+    cols[1].metric("Origin", str(meta.get("origin", "")))
+    cols[2].metric("Process", str(meta.get("process", "")))
+    cols[3].metric("Total roast time", str(meta.get("total_roast_time", "")))
+
+    notes_key = f"library_notes_{rid}"
+    notes_value = st.text_area(
+        "Roast notes",
+        value=str(meta.get("notes", "") or ""),
+        key=notes_key,
+        height=120,
+        help="Edit and save notes for this roast curve.",
+    )
+    if st.button("Save notes", key=f"save_notes_{rid}"):
+        update_roast_notes(rid, notes_value)
+        _load_library_rows.clear()
+        st.success("Notes saved")
+        st.rerun()
+
+    with st.expander("Full metadata"):
+        st.json(meta)

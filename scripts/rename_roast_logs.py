@@ -179,4 +179,75 @@ def apply_renames(plans: list[tuple[RoastRecord, Path]], apply_changes: bool) ->
 def update_metadata(plans: list[tuple[RoastRecord, Path]], apply_changes: bool) -> None:
     for rec, target_path in plans:
         new_meta = dict(rec.meta)
-        new_meta["roast_id"] = r
+        new_meta["roast_id"] = rec.new_name
+        new_meta["bean_title"] = rec.bean_title
+        new_meta["batch_number"] = int(rec.batch_number)
+
+        if not apply_changes:
+            continue
+
+        meta_path = target_path / META_FILENAME
+        meta_path.write_text(json.dumps(new_meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+# Summarize planned changes, printing out the renames and metadata updates that will be applied.
+# If apply_changes is False, it only prints the planned changes without modifying any files. 
+# If apply_changes is True, it executes the renames and metadata updates.
+def summarize(plans: list[tuple[RoastRecord, Path]], apply_changes: bool) -> None:
+    mode = "APPLY" if apply_changes else "DRY-RUN"
+    print(f"[{mode}] Found {len(plans)} roast entries.")
+
+    rename_count = 0
+    for rec, target in plans:
+        changed_name = rec.old_path != target
+        changed_batch = int(rec.meta.get("batch_number", 0) or 0) != rec.batch_number
+        changed_meta_id = str(rec.meta.get("roast_id", "") or "") != rec.new_name
+
+        if changed_name:
+            rename_count += 1
+            print(f"- RENAME: '{rec.old_name}' -> '{target.name}'")
+        elif changed_batch or changed_meta_id:
+            print(f"- META UPDATE: '{rec.old_name}' (batch={rec.batch_number}, roast_id='{rec.new_name}')")
+
+    print(f"[{mode}] Planned folder renames: {rename_count}")
+    if not apply_changes:
+        print("[DRY-RUN] No files were modified. Re-run with --apply to execute.")
+
+
+def main() -> None:
+    # Argument parsing for root directory and apply flag. By default, it runs in dry-run mode, only printing planned changes without modifying any files. 
+    parser = argparse.ArgumentParser(description="Rename roast log folders to a naming standard and update metadata.")
+    # The --root argument allows specifying the root directory containing roast logs (default: data/roasts).
+    parser.add_argument("--root", default=str(DATA_ROOT), help="Roasts root directory (default: data/roasts)")
+    # The --apply flag allows executing the planned changes. Without this flag, the script runs in dry-run mode.
+    parser.add_argument("--apply", action="store_true", help="Apply changes. Without this flag, runs as dry-run.")
+    args = parser.parse_args()
+
+    root = Path(args.root).expanduser().resolve()
+    print(f"Scanning roast root: {root}")
+    records = load_records(root)
+    # if records is empty
+    if not records:
+        print("No roast entries found.")
+        return
+
+    # Assign batch numbers and target names based on bean titles and existing batches
+    # following the naming strategy defined in target_roast_name.
+    assign_batch_and_names(records)
+    plans = plan_renames(records)
+
+    # Summarize planned changes. If --apply is not set, it only prints the planned renames and metadata updates without modifying any files. If --apply is set, it executes the renames and metadata updates.
+    summarize(plans, apply_changes=args.apply)
+    if not args.apply:
+        return
+
+    # renames the folders according to the planned changes
+    # using a two-phase rename to avoid collisions. 
+    # It first renames all folders to temporary names,
+    #  then renames them to their final target names.
+    apply_renames(plans, apply_changes=True)
+    update_metadata(plans, apply_changes=True)
+    print("[APPLY] Rename and metadata update complete.")
+
+
+if __name__ == "__main__":
+    main()

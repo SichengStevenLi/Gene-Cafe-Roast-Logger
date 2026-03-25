@@ -195,7 +195,7 @@ def roast_path(roast_id: str) -> str:
     return os.path.join(DATA_DIR, roast_id)
 
 
-def save_roast_session(meta: RoastMeta, curve_df: pd.DataFrame, events: list[dict]):
+def save_roast_session(meta: RoastMeta, curve_df: pd.DataFrame, events: list[dict], notes: str = ""):
     rp = roast_path(meta.roast_id)
     os.makedirs(rp, exist_ok=True)
 
@@ -208,6 +208,7 @@ def save_roast_session(meta: RoastMeta, curve_df: pd.DataFrame, events: list[dic
     meta_dict["weight_loss_pct"] = weight_loss_pct
     meta_dict["saved_at"] = datetime.now().isoformat()
     meta_dict["events"] = events or []
+    meta_dict["notes"] = (notes or "").strip()
 
     curve_df.to_csv(os.path.join(rp, "curve.csv"), index=False)
     with open(os.path.join(rp, "meta.json"), "w", encoding="utf-8") as f:
@@ -242,6 +243,19 @@ def update_roasted_weight(roast_id: str, roasted_weight_g: float) -> dict:
         meta["weight_loss_pct"] = 100.0 * (raw_weight - float(roasted_weight_g)) / raw_weight
     else:
         meta["weight_loss_pct"] = None
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    return meta
+
+
+def update_roast_notes(roast_id: str, notes: str) -> dict:
+    path = os.path.join(roast_path(roast_id), "meta.json")
+    with open(path, "r", encoding="utf-8") as f:
+        meta = json.load(f)
+
+    meta["notes"] = (notes or "").strip()
 
     with open(path, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)

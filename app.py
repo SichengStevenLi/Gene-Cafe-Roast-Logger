@@ -205,6 +205,8 @@ def init_state():
         st.session_state.is_decaf_input = False
     if "raw_weight_input" not in st.session_state:
         st.session_state.raw_weight_input = 0.0
+    if "roast_notes_input" not in st.session_state:
+        st.session_state.roast_notes_input = ""
 
 # Get elapsed seconds since roast start, or 0 if not started
 def current_elapsed_sec() -> float:
@@ -664,6 +666,13 @@ def main():
     new_set_temp = int(set_temp_input)
     apply_set = st.sidebar.button("Apply set temp(F)")
 
+    st.sidebar.text_area(
+        "Roast notes",
+        key="roast_notes_input",
+        height=100,
+        help="You can write notes before, during, or after logging. Notes are saved with the roast.",
+    )
+
     pause_resume_label = "Pause roast" if st.session_state.running else "Resume roast"
     pause_resume_btn = st.sidebar.button(
         pause_resume_label,
@@ -710,6 +719,7 @@ def main():
         st.session_state.end_confirm_prev_running = False
         st.session_state.roast_id = None
         st.session_state.last_saved_roast_id = None
+        st.session_state.roast_notes_input = ""
         st.rerun()
 
     # Apply set temp immediately when "Apply" button is pressed, even if not currently running. This allows the classifier to use the updated set temp for its logic right away.
@@ -844,7 +854,12 @@ def main():
                 disabled_ids = set(int(x) for x in st.session_state.disabled_point_ids)
                 if not end_df.empty and disabled_ids:
                     end_df = end_df.loc[~end_df.index.isin(disabled_ids)].reset_index(drop=True)
-                save_roast_session(meta=meta, curve_df=end_df, events=st.session_state.events)
+                save_roast_session(
+                    meta=meta,
+                    curve_df=end_df,
+                    events=st.session_state.events,
+                    notes=st.session_state.roast_notes_input,
+                )
                 st.session_state.last_saved_roast_id = meta.roast_id
 
                 st.session_state.running = False
