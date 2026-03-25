@@ -54,8 +54,11 @@ def recommend_roasts(
     appearance: str,
     raw_weight_g: float,
     is_decaf: bool,
+    bean_category: str,
     variety: str,
     limit: int = 5,
+    bean_type: str = "",
+    **_unused,
 ):
     """
     Default base weights (out of 100):
@@ -199,6 +202,16 @@ def recommend_roasts(
                 score += ratio_closeness * 8.0
         except Exception:
             pass
+
+        # Bean type last priority.
+        meta_type = str(meta.get("bean_category", "")).strip()
+        if not meta_type:
+            # Backward compatibility with older saved roasts.
+            legacy = str(meta.get("bean_type", "")).strip()
+            meta_type = legacy.split("/")[0].strip() if legacy else ""
+
+        if bean_category and meta_type.lower() == bean_category.strip().lower():
+            score += 4
 
         if score > 0:
             results.append((rid, score))

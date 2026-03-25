@@ -31,6 +31,8 @@ from storage import (
     list_roasts,
     load_roast_curve,
     load_roast_meta,
+    load_camera_config,
+    save_camera_config,
 )
 from recommend import recommend_roasts
 
@@ -38,6 +40,8 @@ from recommend import recommend_roasts
 APP_TITLE = "Gene Café Roast Logger"
 # customizable sampling interval (seconds)
 SAMPLE_INTERVAL_SEC = 5.0
+# Run OCR at a non-1s cadence so we don't phase-lock with a 1s display toggle.
+OCR_READ_INTERVAL_SEC = 0.7
 PLOT_WINDOW_SEC = 15 * 60
 
 ORIGIN_OPTIONS = [
@@ -125,6 +129,11 @@ def init_state():
         st.session_state.start_epoch = None
     if "last_sample_epoch" not in st.session_state:
         st.session_state.last_sample_epoch = 0.0
+    if "last_ocr_epoch" not in st.session_state:
+        st.session_state.last_ocr_epoch = 0.0
+    if "pending_ocr" not in st.session_state:
+        # Holds the most recent confirmed CURRENT_VIEW read within the current 5s window
+        st.session_state.pending_ocr = None  # dict with keys raw_read, result
     if "samples" not in st.session_state:
         st.session_state.samples = []  # list of dict rows
     if "events" not in st.session_state:
@@ -306,15 +315,19 @@ def main():
 
     st.sidebar.divider()
 
-    # Camera selection
-    cam_index = st.sidebar.number_input("Camera index (usually 0)", min_value=0, value=0, step=1)
- 
-    # ROI calibration: for MVP, hardcode ROI; later make interactive.
-    st.sidebar.caption("ROI (pixels): x, y, w, h (edit after you test)")
-    roi_x = st.sidebar.number_input("ROI x", min_value=0, value=0, step=1)
-    roi_y = st.sidebar.number_input("ROI y", min_value=0, value=0, step=1)
-    roi_w = st.sidebar.number_input("ROI w", min_value=10, value=320, step=10)
-    roi_h = st.sidebar.number_input("ROI h", min_value=10, value=180, step=10)
+    # Camera selection — load last saved settings as defaults
+    _cam_cfg = load_camera_config()
+    cam_index = st.sidebar.number_input("Camera index (usually 0)", min_value=0, value=int(_cam_cfg["cam_index"]), step=1)
+
+    # ROI calibration
+    st.sidebar.caption("ROI (pixels): x, y, w, h")
+    roi_x = st.sidebar.number_input("ROI x", min_value=0, value=int(_cam_cfg["roi_x"]), step=1)
+    roi_y = st.sidebar.number_input("ROI y", min_value=0, value=int(_cam_cfg["roi_y"]), step=1)
+    roi_w = st.sidebar.number_input("ROI w", min_value=10, value=int(_cam_cfg["roi_w"]), step=10)
+    roi_h = st.sidebar.number_input("ROI h", min_value=10, value=int(_cam_cfg["roi_h"]), step=10)
+    if st.sidebar.button("Save camera settings", help="Remember these ROI and camera values for next time"):
+        save_camera_config(int(cam_index), int(roi_x), int(roi_y), int(roi_w), int(roi_h))
+        st.sidebar.success("Camera settings saved.")
 
     colA, colB = st.sidebar.columns(2)
     reset_session = colB.button("Reset session")
@@ -381,7 +394,6 @@ def main():
     if st.sidebar.button("Suggest similar roasts"):
         suggestions = recommend_roasts(
             origin=origin,
-            bean_type=bean_type,
             altitude=int(altitude),
             process=process,
             appearance=appearance,
@@ -439,6 +451,8 @@ def main():
         st.session_state.end_confirm_pending = False
         st.session_state.start_epoch = None
         st.session_state.last_sample_epoch = 0.0
+        st.session_state.last_ocr_epoch = 0.0
+        st.session_state.pending_ocr = None
         st.session_state.samples = []
         st.session_state.events = []
         st.session_state.set_temp = None
@@ -497,6 +511,8 @@ def main():
         st.session_state.end_confirm_pending = False
         st.session_state.start_epoch = time.time()
         st.session_state.last_sample_epoch = 0.0
+        st.session_state.last_ocr_epoch = 0.0
+        st.session_state.pending_ocr = None
         st.session_state.samples = []
         st.session_state.events = []
         st.session_state.classifier = TempClassifier()
@@ -665,9 +681,9 @@ def main():
         else:
             plot_df = df
 
-        # Reference curve overlay (optional)
+        # Reference curve underlay — only shown while roast is active (acts as a guide)
         ref_df = None
-        if st.session_state.reference_roast_id:
+        if st.session_state.roast_active and st.session_state.reference_roast_id:
             try:
                 ref_df = load_roast_curve(st.session_state.reference_roast_id)
             except Exception as e:
@@ -763,7 +779,7 @@ def main():
                     st.session_state.disabled_point_ids = sorted(new_disabled)
                     st.rerun()
 
-        st.caption("Tip: if OCR is noisy, we’ll add sanity filters + consecutive-read logic in classifier.py.")
+        # st.caption("Tip: if OCR is noisy, we’ll add sanity filters + consecutive-read logic in classifier.py.")
 
     with right:
         st.subheader("Camera / Debug")
@@ -848,9 +864,10 @@ def main():
         if elapsed >= PLOT_WINDOW_SEC:
             st.session_state.running = False
 
-        # sample every 5s
-        if now - st.session_state.last_sample_epoch >= SAMPLE_INTERVAL_SEC:
-            st.session_state.last_sample_epoch = now
+        # Run OCR every 1s so the classifier sees the display alternating
+        # between set-temp and current-temp modes
+        if now - st.session_state.last_ocr_epoch >= OCR_READ_INTERVAL_SEC:
+            st.session_state.last_ocr_epoch = now
 
             frame, roi = st.session_state.camera.read()
             raw_read, conf = read_temperature_from_frame(roi)
@@ -861,7 +878,20 @@ def main():
                 confidence=conf,
                 t_sec=elapsed,
             )
-            add_sample(elapsed, raw_read=raw_read, result=result)
+
+            # Buffer the read only if it's a confirmed current-temp display
+            if result.view_mode == "CURRENT_VIEW" and result.current_temp is not None:
+                st.session_state.pending_ocr = {"raw_read": raw_read, "result": result}
+
+        # Every 5s, commit one buffered current-temp point to the plot.
+        # If the display was stuck on set-temp the whole window, skip — don't plot noise.
+        if now - st.session_state.last_sample_epoch >= SAMPLE_INTERVAL_SEC:
+            st.session_state.last_sample_epoch = now
+
+            if st.session_state.pending_ocr is not None:
+                p = st.session_state.pending_ocr
+                add_sample(elapsed, raw_read=p["raw_read"], result=p["result"])
+                st.session_state.pending_ocr = None
 
         # Gentle tick to keep UI responsive
         time.sleep(0.05)

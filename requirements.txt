@@ -4,3 +4,4 @@ numpy>=1.24
 pandas>=2.0
 matplotlib>=3.7
 pytesseract>=0.3.10
+plotly>=5.20

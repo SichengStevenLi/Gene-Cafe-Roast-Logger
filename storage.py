@@ -8,6 +8,39 @@ import pandas as pd
 
 
 DATA_DIR = os.path.join("data", "roasts")
+CAMERA_CONFIG_PATH = os.path.join("data", "camera_config.json")
+
+_CAMERA_CONFIG_DEFAULTS = {
+    "cam_index": 0,
+    "roi_x": 0,
+    "roi_y": 0,
+    "roi_w": 320,
+    "roi_h": 180,
+}
+
+
+def load_camera_config() -> dict:
+    """Load persisted camera/ROI settings, or return defaults."""
+    if os.path.exists(CAMERA_CONFIG_PATH):
+        try:
+            with open(CAMERA_CONFIG_PATH, "r") as f:
+                data = json.load(f)
+            # Fill in any missing keys with defaults
+            return {**_CAMERA_CONFIG_DEFAULTS, **data}
+        except Exception:
+            pass
+    return dict(_CAMERA_CONFIG_DEFAULTS)
+
+
+def save_camera_config(cam_index: int, roi_x: int, roi_y: int, roi_w: int, roi_h: int) -> None:
+    """Persist camera/ROI settings to disk."""
+    os.makedirs("data", exist_ok=True)
+    with open(CAMERA_CONFIG_PATH, "w") as f:
+        json.dump(
+            {"cam_index": cam_index, "roi_x": roi_x, "roi_y": roi_y, "roi_w": roi_w, "roi_h": roi_h},
+            f,
+            indent=2,
+        )
 
 
 @dataclass

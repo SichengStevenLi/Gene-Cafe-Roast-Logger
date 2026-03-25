@@ -41,6 +41,39 @@ class RoastPlotter:
 
         max_temp_f = 480.0
 
+        # Reference underlay — drawn first so it sits beneath the live curve
+        if ref_df is not None and not ref_df.empty and "temp_current" in ref_df.columns:
+            r = ref_df.dropna(subset=["temp_current"]).sort_values("t_sec")
+            if not r.empty:
+                y_ref_f = r["temp_current"].astype(float)
+                x_ref_smooth, y_ref_smooth = _smoothed_line(r["t_sec"].to_numpy(), y_ref_f.to_numpy())
+                # Filled area under the reference line
+                fig.add_trace(
+                    go.Scatter(
+                        x=x_ref_smooth,
+                        y=y_ref_smooth,
+                        mode="lines",
+                        name="Guide curve",
+                        line={"color": "rgba(255, 140, 0, 0.0)", "width": 0},
+                        fill="tozeroy",
+                        fillcolor="rgba(255, 140, 0, 0.08)",
+                        hoverinfo="skip",
+                        showlegend=False,
+                    )
+                )
+                # Faint guide line on top of the fill
+                fig.add_trace(
+                    go.Scatter(
+                        x=x_ref_smooth,
+                        y=y_ref_smooth,
+                        mode="lines",
+                        name="Guide curve",
+                        line={"color": "rgba(255, 140, 0, 0.35)", "width": 2, "dash": "dot"},
+                        hoverinfo="skip",
+                    )
+                )
+                max_temp_f = max(max_temp_f, float(y_ref_f.max()) + 10.0)
+
         # Current temp points only where temp_current is not null
         if not df.empty and "temp_current" in df.columns:
             plot_df = df.dropna(subset=["temp_current"]).sort_values("t_sec")
@@ -72,25 +105,6 @@ class RoastPlotter:
                     )
                 )
                 max_temp_f = max(max_temp_f, float(y_cur_f.max()) + 10.0)
-
-        # Reference overlay
-        if ref_df is not None and not ref_df.empty and "temp_current" in ref_df.columns:
-            r = ref_df.dropna(subset=["temp_current"]).sort_values("t_sec")
-            if not r.empty:
-                y_ref_f = r["temp_current"].astype(float)
-                x_ref_smooth, y_ref_smooth = _smoothed_line(r["t_sec"].to_numpy(), y_ref_f.to_numpy())
-                fig.add_trace(
-                    go.Scatter(
-                        x=x_ref_smooth,
-                        y=y_ref_smooth,
-                        mode="lines",
-                        name="Reference curve",
-                        line={"color": "#ff7f0e", "width": 2},
-                        opacity=0.45,
-                        hoverinfo="skip",
-                    )
-                )
-                max_temp_f = max(max_temp_f, float(y_ref_f.max()) + 10.0)
 
         set_change_events = [e for e in (events or []) if e.get("type") == "set_change"]
         if set_change_events:
