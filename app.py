@@ -25,7 +25,6 @@ from plotter import RoastPlotter
 from storage import (
     RoastMeta,
     ensure_data_dirs,
-    make_roast_id,
     save_roast_session,
     update_roasted_weight,
     list_roasts,
@@ -36,6 +35,9 @@ from storage import (
     list_bean_profile_titles,
     get_bean_profile,
     save_bean_profile,
+    list_roasts_for_bean,
+    next_batch_number,
+    make_roast_log_name,
 )
 from recommend import recommend_roasts
 
@@ -464,6 +466,7 @@ def main():
     )
 
     requirement_checks = [
+        ("Coffee name", bool(bean_title.strip()), "Coffee name is required"),
         ("Origin", bool(origin.strip()) and origin != "(select)", "Origin is required"),
         ("Type", bool(bean_type_value.strip()) and bean_type_value != "(select)", "Type is required"),
         ("Variety", bool(variety_value.strip()) and variety_value != "(select)", "Variety is required"),
@@ -505,9 +508,43 @@ def main():
 
     # Recommend similar roasts based on metadata if available
     roasts = list_roasts()
+
+    roast_meta_cache: dict[str, dict] = {}
+    title_counts: dict[str, int] = {}
+
+    def _norm_title_key(title: str) -> str:
+        return " ".join((title or "").strip().lower().split())
+
+    for rid in roasts:
+        try:
+            m = load_roast_meta(rid)
+            roast_meta_cache[rid] = m
+            t = str(m.get("bean_title", "") or "").strip()
+            if t:
+                key = _norm_title_key(t)
+                title_counts[key] = title_counts.get(key, 0) + 1
+        except Exception:
+            continue
+
+    def _roast_label(rid: str) -> str:
+        m = roast_meta_cache.get(rid, {})
+        t = str(m.get("bean_title", "") or "").strip()
+        if not t:
+            return rid
+        count = title_counts.get(_norm_title_key(t), 0)
+        batch_no = int(m.get("batch_number", 1) or 1)
+        if count <= 1:
+            return t
+        return f"{t} #{batch_no}"
+
     roast_choices = ["(none)"] + roasts
     ref_default_index = roast_choices.index(st.session_state.reference_roast_id) if st.session_state.reference_roast_id in roast_choices else 0
-    ref_choice = st.sidebar.selectbox("Select reference roast", roast_choices, index=ref_default_index)
+    ref_choice = st.sidebar.selectbox(
+        "Select reference roast",
+        roast_choices,
+        index=ref_default_index,
+        format_func=lambda rid: "(none)" if rid == "(none)" else _roast_label(rid),
+    )
 
     # If a reference roast is selected, store it in session state to overlay in the plot
     if ref_choice != "(none)":
@@ -518,24 +555,29 @@ def main():
     # Detect exact same bean by title and offer quick-reference action.
     bean_title_clean = bean_title.strip()
     if bean_title_clean:
-        same_bean_matches: list[str] = []
-        for rid in roasts:
-            try:
-                meta = load_roast_meta(rid)
-            except Exception:
-                continue
-            if str(meta.get("bean_title", "") or "").strip().lower() == bean_title_clean.lower():
-                same_bean_matches.append(rid)
+        same_bean_versions = list_roasts_for_bean(bean_title_clean)
+        if same_bean_versions:
+            same_bean_ids = [rid for rid, _ in same_bean_versions]
+            default_same_idx = 0
+            if st.session_state.reference_roast_id in same_bean_ids:
+                default_same_idx = same_bean_ids.index(st.session_state.reference_roast_id)
 
-        if same_bean_matches:
-            latest_same_bean = sorted(same_bean_matches, reverse=True)[0]
             st.sidebar.info(
                 f"Detected the same bean in your history: {bean_title_clean}. "
-                f"Use {latest_same_bean} as reference curve?"
+                "Do you want to use one of its previous roast versions as reference?"
             )
-            if st.sidebar.button("Use same-bean reference", key="use_same_bean_reference"):
-                st.session_state.reference_roast_id = latest_same_bean
-                st.session_state.suggested_roast_choice = latest_same_bean
+
+            selected_same_bean_version = st.sidebar.selectbox(
+                "Same-bean roast versions (newest to oldest)",
+                same_bean_ids,
+                index=default_same_idx,
+                format_func=lambda rid: _roast_label(rid),
+                key="same_bean_versions_select",
+            )
+
+            if st.sidebar.button("Use selected same-bean version", key="use_same_bean_reference"):
+                st.session_state.reference_roast_id = selected_same_bean_version
+                st.session_state.suggested_roast_choice = selected_same_bean_version
                 st.rerun()
 
     # Suggest reference roasts if not in log (simple recommender)
@@ -574,7 +616,7 @@ def main():
             "Suggested options",
             options=suggestion_options,
             index=suggestion_options.index(st.session_state.suggested_roast_choice),
-            format_func=lambda rid: f"{rid} (score {suggestion_scores[rid]:.1f})",
+            format_func=lambda rid: f"{_roast_label(rid)} (score {suggestion_scores[rid]:.1f})",
         )
         st.session_state.suggested_roast_choice = selected_suggestion
         st.session_state.reference_roast_id = selected_suggestion
@@ -673,7 +715,7 @@ def main():
             st.session_state.preview_cam_index = None
             st.session_state.preview_roi = None
 
-        st.session_state.roast_id = make_roast_id(origin or "unknown", process or "unknown")
+        st.session_state.roast_id = bean_title.strip() or None
         st.session_state.roast_active = True
         st.session_state.running = True
         st.session_state.end_confirm_pending = False
@@ -751,9 +793,15 @@ def main():
                 for e in final_errors:
                     st.sidebar.write(f"- {e}")
             else:
+                clean_bean_title = bean_title.strip()
+                if not clean_bean_title:
+                    clean_bean_title = "Untitled Coffee"
+                batch_number = next_batch_number(clean_bean_title)
+                roast_log_name = make_roast_log_name(clean_bean_title, batch_number)
+
                 meta = RoastMeta(
-                    roast_id=st.session_state.roast_id or make_roast_id(origin or "unknown", process or "unknown"),
-                    bean_title=bean_title.strip(),
+                    roast_id=roast_log_name,
+                    bean_title=clean_bean_title,
                     origin=origin,
                     bean_type=bean_type,
                     altitude_m=int(altitude),
@@ -766,6 +814,7 @@ def main():
                     bean_category=bean_type_value if bean_type_value != "(select)" else "",
                     variety=variety_value if variety_value != "(select)" else "",
                     bean_appearance=appearance if appearance != "(select)" else "",
+                    batch_number=batch_number,
                 )
 
                 end_df = pd.DataFrame(st.session_state.samples)
