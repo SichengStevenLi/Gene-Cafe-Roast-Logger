@@ -33,6 +33,9 @@ from storage import (
     load_roast_meta,
     load_camera_config,
     save_camera_config,
+    list_bean_profile_titles,
+    get_bean_profile,
+    save_bean_profile,
 )
 from recommend import recommend_roasts
 
@@ -170,6 +173,38 @@ def init_state():
         st.session_state.end_confirm_prev_running = False
     if "last_saved_roast_id" not in st.session_state:
         st.session_state.last_saved_roast_id = None
+    if "suggested_roasts" not in st.session_state:
+        st.session_state.suggested_roasts = []  # list[(roast_id, score)]
+    if "suggested_roast_choice" not in st.session_state:
+        st.session_state.suggested_roast_choice = None
+    if "bean_title_input" not in st.session_state:
+        st.session_state.bean_title_input = ""
+    if "origin_choice_input" not in st.session_state:
+        st.session_state.origin_choice_input = "(select)"
+    if "origin_custom_input" not in st.session_state:
+        st.session_state.origin_custom_input = ""
+    if "type_choice_input" not in st.session_state:
+        st.session_state.type_choice_input = "(select)"
+    if "type_custom_input" not in st.session_state:
+        st.session_state.type_custom_input = ""
+    if "variety_choice_input" not in st.session_state:
+        st.session_state.variety_choice_input = "(select)"
+    if "variety_custom_input" not in st.session_state:
+        st.session_state.variety_custom_input = ""
+    if "appearance_choice_input" not in st.session_state:
+        st.session_state.appearance_choice_input = "(select)"
+    if "appearance_custom_input" not in st.session_state:
+        st.session_state.appearance_custom_input = ""
+    if "process_choice_input" not in st.session_state:
+        st.session_state.process_choice_input = "(select)"
+    if "process_custom_input" not in st.session_state:
+        st.session_state.process_custom_input = ""
+    if "altitude_input" not in st.session_state:
+        st.session_state.altitude_input = 0
+    if "is_decaf_input" not in st.session_state:
+        st.session_state.is_decaf_input = False
+    if "raw_weight_input" not in st.session_state:
+        st.session_state.raw_weight_input = 0.0
 
 # Get elapsed seconds since roast start, or 0 if not started
 def current_elapsed_sec() -> float:
@@ -274,25 +309,77 @@ def main():
     st.sidebar.header("Roast Setup")
 
     # Bean metadata inputs (before roast)
-    origin_choice = st.sidebar.selectbox("Origin", ORIGIN_OPTIONS, index=0)
+    bean_profile_choices = ["(none)"] + list_bean_profile_titles()
+    selected_profile = st.sidebar.selectbox("Saved bean profile", bean_profile_choices, index=0)
+    load_profile_btn = st.sidebar.button("Load bean profile")
+
+    if load_profile_btn and selected_profile != "(none)":
+        p = get_bean_profile(selected_profile) or {}
+
+        def _set_choice_and_custom(value: str, options: list[str], choice_key: str, custom_key: str):
+            clean = (value or "").strip()
+            if clean and clean in options and clean != "Other":
+                st.session_state[choice_key] = clean
+                st.session_state[custom_key] = ""
+            elif clean:
+                st.session_state[choice_key] = "Other"
+                st.session_state[custom_key] = clean
+            else:
+                st.session_state[choice_key] = "(select)"
+                st.session_state[custom_key] = ""
+
+        st.session_state.bean_title_input = str(p.get("bean_title", "") or "")
+        _set_choice_and_custom(str(p.get("origin", "") or ""), ORIGIN_OPTIONS, "origin_choice_input", "origin_custom_input")
+        _set_choice_and_custom(str(p.get("bean_category", "") or ""), TYPE_OPTIONS, "type_choice_input", "type_custom_input")
+        _set_choice_and_custom(str(p.get("variety", "") or ""), VARIETY_OPTIONS, "variety_choice_input", "variety_custom_input")
+        _set_choice_and_custom(str(p.get("bean_appearance", "") or ""), BEAN_APPEARANCE_OPTIONS, "appearance_choice_input", "appearance_custom_input")
+        _set_choice_and_custom(str(p.get("process", "") or ""), PROCESS_OPTIONS, "process_choice_input", "process_custom_input")
+        st.session_state.altitude_input = int(p.get("altitude_m", 0) or 0)
+        st.session_state.is_decaf_input = bool(p.get("is_decaf", False))
+        st.session_state.raw_weight_input = float(p.get("raw_weight_g", 0.0) or 0.0)
+        st.rerun()
+
+    bean_title = st.sidebar.text_input("Coffee name", value=st.session_state.get("bean_title_input", ""), key="bean_title_input")
+
+    origin_choice = st.sidebar.selectbox(
+        "Origin",
+        ORIGIN_OPTIONS,
+        index=ORIGIN_OPTIONS.index(st.session_state.get("origin_choice_input", "(select)")) if st.session_state.get("origin_choice_input", "(select)") in ORIGIN_OPTIONS else 0,
+        key="origin_choice_input",
+    )
     origin = origin_choice
     if origin_choice == "Other":
-        origin = st.sidebar.text_input("Origin (custom)", value="")
+        origin = st.sidebar.text_input("Origin (custom)", value=st.session_state.get("origin_custom_input", ""), key="origin_custom_input")
 
-    type_choice = st.sidebar.selectbox("Type", TYPE_OPTIONS, index=0)
+    type_choice = st.sidebar.selectbox(
+        "Type",
+        TYPE_OPTIONS,
+        index=TYPE_OPTIONS.index(st.session_state.get("type_choice_input", "(select)")) if st.session_state.get("type_choice_input", "(select)") in TYPE_OPTIONS else 0,
+        key="type_choice_input",
+    )
     bean_type_value = type_choice
     if type_choice == "Other":
-        bean_type_value = st.sidebar.text_input("Type (custom)", value="")
+        bean_type_value = st.sidebar.text_input("Type (custom)", value=st.session_state.get("type_custom_input", ""), key="type_custom_input")
 
-    variety_choice = st.sidebar.selectbox("Variety", VARIETY_OPTIONS, index=0)
+    variety_choice = st.sidebar.selectbox(
+        "Variety",
+        VARIETY_OPTIONS,
+        index=VARIETY_OPTIONS.index(st.session_state.get("variety_choice_input", "(select)")) if st.session_state.get("variety_choice_input", "(select)") in VARIETY_OPTIONS else 0,
+        key="variety_choice_input",
+    )
     variety_value = variety_choice
     if variety_choice == "Other":
-        variety_value = st.sidebar.text_input("Variety (custom)", value="")
+        variety_value = st.sidebar.text_input("Variety (custom)", value=st.session_state.get("variety_custom_input", ""), key="variety_custom_input")
 
-    size_choice = st.sidebar.selectbox("Appearance", BEAN_APPEARANCE_OPTIONS, index=0)
+    size_choice = st.sidebar.selectbox(
+        "Appearance",
+        BEAN_APPEARANCE_OPTIONS,
+        index=BEAN_APPEARANCE_OPTIONS.index(st.session_state.get("appearance_choice_input", "(select)")) if st.session_state.get("appearance_choice_input", "(select)") in BEAN_APPEARANCE_OPTIONS else 0,
+        key="appearance_choice_input",
+    )
     appearance = size_choice
     if size_choice == "Other":
-        appearance = st.sidebar.text_input("Appearance (custom)", value="")
+        appearance = st.sidebar.text_input("Appearance (custom)", value=st.session_state.get("appearance_custom_input", ""), key="appearance_custom_input")
 
     # Keep compatibility with existing storage/recommendation schema.
     bean_type = ""
@@ -303,15 +390,52 @@ def main():
     elif variety_value.strip() and variety_value != "(select)":
         bean_type = variety_value
 
-    altitude = st.sidebar.number_input("Altitude (m)", min_value=0, max_value=10000, value=0, step=10)
-    process_choice = st.sidebar.selectbox("Processing method", PROCESS_OPTIONS, index=0)
+    altitude = st.sidebar.number_input(
+        "Altitude (m)",
+        min_value=0,
+        max_value=10000,
+        value=int(st.session_state.get("altitude_input", 0)),
+        step=10,
+        key="altitude_input",
+    )
+    process_choice = st.sidebar.selectbox(
+        "Processing method",
+        PROCESS_OPTIONS,
+        index=PROCESS_OPTIONS.index(st.session_state.get("process_choice_input", "(select)")) if st.session_state.get("process_choice_input", "(select)") in PROCESS_OPTIONS else 0,
+        key="process_choice_input",
+    )
     process = process_choice
     if process_choice == "Other":
-        process = st.sidebar.text_input("Processing method (custom)", value="")
+        process = st.sidebar.text_input("Processing method (custom)", value=st.session_state.get("process_custom_input", ""), key="process_custom_input")
 
-    is_decaf = st.sidebar.checkbox("Decaf", value=False)
+    is_decaf = st.sidebar.checkbox("Decaf", value=bool(st.session_state.get("is_decaf_input", False)), key="is_decaf_input")
 
-    raw_weight = st.sidebar.number_input("Raw weight (g)", min_value=0.0, value=0.0, step=0.1)
+    raw_weight = st.sidebar.number_input(
+        "Raw weight (g)",
+        min_value=0.0,
+        value=float(st.session_state.get("raw_weight_input", 0.0)),
+        step=0.1,
+        key="raw_weight_input",
+    )
+
+    if st.sidebar.button("Save bean profile"):
+        if not bean_title.strip():
+            st.sidebar.warning("Coffee name is required to save a bean profile.")
+        else:
+            save_bean_profile(
+                bean_title,
+                {
+                    "origin": origin if origin != "(select)" else "",
+                    "bean_category": bean_type_value if bean_type_value != "(select)" else "",
+                    "variety": variety_value if variety_value != "(select)" else "",
+                    "bean_appearance": appearance if appearance != "(select)" else "",
+                    "altitude_m": int(altitude),
+                    "process": process if process != "(select)" else "",
+                    "is_decaf": bool(is_decaf),
+                    "raw_weight_g": float(raw_weight),
+                },
+            )
+            st.sidebar.success(f"Saved bean profile: {bean_title}")
 
     st.sidebar.divider()
 
@@ -382,13 +506,37 @@ def main():
     # Recommend similar roasts based on metadata if available
     roasts = list_roasts()
     roast_choices = ["(none)"] + roasts
-    ref_choice = st.sidebar.selectbox("Select reference roast", roast_choices, index=0)
+    ref_default_index = roast_choices.index(st.session_state.reference_roast_id) if st.session_state.reference_roast_id in roast_choices else 0
+    ref_choice = st.sidebar.selectbox("Select reference roast", roast_choices, index=ref_default_index)
 
     # If a reference roast is selected, store it in session state to overlay in the plot
     if ref_choice != "(none)":
         st.session_state.reference_roast_id = ref_choice
     else:
         st.session_state.reference_roast_id = None
+
+    # Detect exact same bean by title and offer quick-reference action.
+    bean_title_clean = bean_title.strip()
+    if bean_title_clean:
+        same_bean_matches: list[str] = []
+        for rid in roasts:
+            try:
+                meta = load_roast_meta(rid)
+            except Exception:
+                continue
+            if str(meta.get("bean_title", "") or "").strip().lower() == bean_title_clean.lower():
+                same_bean_matches.append(rid)
+
+        if same_bean_matches:
+            latest_same_bean = sorted(same_bean_matches, reverse=True)[0]
+            st.sidebar.info(
+                f"Detected the same bean in your history: {bean_title_clean}. "
+                f"Use {latest_same_bean} as reference curve?"
+            )
+            if st.sidebar.button("Use same-bean reference", key="use_same_bean_reference"):
+                st.session_state.reference_roast_id = latest_same_bean
+                st.session_state.suggested_roast_choice = latest_same_bean
+                st.rerun()
 
     # Suggest reference roasts if not in log (simple recommender)
     if st.sidebar.button("Suggest similar roasts"):
@@ -403,13 +551,33 @@ def main():
             variety=variety_value if variety_value != "(select)" else "",
             limit=5,
         )
-        # For now we just show the roast IDs and scores; later we can show more metadata and maybe a thumbnail of the curve.
         if suggestions:
-            st.sidebar.write("Top suggestions:")
-            for rid, score in suggestions:
-                st.sidebar.write(f"- {rid} (score {score:.1f})")
+            st.session_state.suggested_roasts = suggestions
+            current_options = [rid for rid, _ in suggestions]
+            if st.session_state.suggested_roast_choice not in current_options:
+                st.session_state.suggested_roast_choice = current_options[0]
+            st.session_state.reference_roast_id = st.session_state.suggested_roast_choice
         else:
+            st.session_state.suggested_roasts = []
+            st.session_state.suggested_roast_choice = None
             st.sidebar.info("No saved roasts yet to compare.")
+
+    if st.session_state.suggested_roasts:
+        st.sidebar.caption("Suggested compatible curves")
+        suggestion_scores = {rid: score for rid, score in st.session_state.suggested_roasts}
+        suggestion_options = [rid for rid, _ in st.session_state.suggested_roasts]
+
+        if st.session_state.suggested_roast_choice not in suggestion_options:
+            st.session_state.suggested_roast_choice = suggestion_options[0]
+
+        selected_suggestion = st.sidebar.radio(
+            "Suggested options",
+            options=suggestion_options,
+            index=suggestion_options.index(st.session_state.suggested_roast_choice),
+            format_func=lambda rid: f"{rid} (score {suggestion_scores[rid]:.1f})",
+        )
+        st.session_state.suggested_roast_choice = selected_suggestion
+        st.session_state.reference_roast_id = selected_suggestion
 
 
     start_btn = st.sidebar.button(
@@ -585,6 +753,7 @@ def main():
             else:
                 meta = RoastMeta(
                     roast_id=st.session_state.roast_id or make_roast_id(origin or "unknown", process or "unknown"),
+                    bean_title=bean_title.strip(),
                     origin=origin,
                     bean_type=bean_type,
                     altitude_m=int(altitude),

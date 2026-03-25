@@ -50,7 +50,4 @@ class TempClassifier:
         equal_elapsed = max(0.0, float(t_sec) - float(self.equal_since_t))
         if equal_elapsed >= self.equal_duration_sec:
             # If equal for long enough, assume current reached set
-            return ClassifierResult("CURRENT_VIEW", set_temp, set_temp, confidence)
-
-        # otherwise treat as set view (don’t log as current yet)
-        return ClassifierResult("SET_VIEW", None, set_temp, confidence)
+            return Classifie
