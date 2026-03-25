@@ -655,7 +655,6 @@ def main():
 
     st.sidebar.divider()
     st.sidebar.subheader("Roast Controls")
-    st.sidebar.divider()
     set_temp_input = st.sidebar.number_input(
         "Current set temp(F)",
         min_value=0,

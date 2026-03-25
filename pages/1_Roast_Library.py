@@ -4,7 +4,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from storage import list_roasts, load_roast_meta, load_roast_curve, list_roasts_for_bean, update_roast_notes
+from storage import list_roasts, load_roast_meta, load_roast_curve, update_roast_notes
 
 
 st.set_page_config(page_title="Roast Library", layout="wide")
@@ -20,6 +20,69 @@ def _fmt_mmss(seconds: float) -> str:
     total = max(0, int(round(float(seconds))))
     m, s = divmod(total, 60)
     return f"{m}:{s:02d}"
+
+
+def _fmt_saved_at(saved_at: str) -> str:
+    raw = str(saved_at or "").strip()
+    if not raw:
+        return "Unknown date/time"
+    try:
+        return dt.datetime.fromisoformat(raw).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return raw
+
+
+def _parse_mmss_to_sec(mmss: str) -> float:
+    s = str(mmss or "").strip()
+    if ":" not in s:
+        return 0.0
+    try:
+        m_str, s_str = s.split(":", 1)
+        return float(int(m_str) * 60 + int(s_str))
+    except Exception:
+        return 0.0
+
+
+def _compute_phase_stats(events: list[dict], elapsed_sec: float) -> dict[str, tuple[float, float]]:
+    yellow_t = next((float(e.get("t_sec", 0)) for e in events if e.get("type") == "yellowing_start"), None)
+    browning_t = next((float(e.get("t_sec", 0)) for e in events if e.get("type") == "browning_start"), None)
+    crack_t = next((float(e.get("t_sec", 0)) for e in events if e.get("type") == "first_crack"), None)
+
+    elapsed = max(0.0, float(elapsed_sec))
+    drying = 0.0
+    yellowing = 0.0
+    maillard = 0.0
+    development = 0.0
+
+    if yellow_t is None:
+        drying = elapsed
+    elif browning_t is None:
+        drying = min(elapsed, yellow_t)
+        yellowing = max(0.0, elapsed - yellow_t)
+    elif crack_t is None:
+        drying = min(elapsed, yellow_t)
+        yellowing = max(0.0, browning_t - yellow_t)
+        maillard = max(0.0, elapsed - browning_t)
+    else:
+        drying = min(elapsed, yellow_t)
+        yellowing = max(0.0, browning_t - yellow_t)
+        maillard = max(0.0, crack_t - browning_t)
+        development = max(0.0, elapsed - crack_t)
+
+    if elapsed <= 0:
+        return {
+            "Drying": (0.0, 0.0),
+            "Yellowing": (0.0, 0.0),
+            "Maillard": (0.0, 0.0),
+            "Development": (0.0, 0.0),
+        }
+
+    return {
+        "Drying": ((drying / elapsed) * 100.0, drying),
+        "Yellowing": ((yellowing / elapsed) * 100.0, yellowing),
+        "Maillard": ((maillard / elapsed) * 100.0, maillard),
+        "Development": ((development / elapsed) * 100.0, development),
+    }
 
 # Safe title for filesystem paths, without batch number.
 @st.cache_data(show_spinner=False)
@@ -165,6 +228,66 @@ def _build_compare_figure(selected_roasts: list[str], labels: dict[str, str]) ->
     return fig
 
 
+def _render_roast_panel(rid: str, label_map: dict[str, str], meta_map: dict[str, dict]) -> None:
+    meta = meta_map.get(rid, {})
+    fig = _build_compare_figure([rid], label_map)
+    fig.update_layout(title=label_map.get(rid, rid), showlegend=False)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    start_temp = int(meta.get("preheat_temp", 0) or 0)
+    st.markdown(f"**Starting set temp:** {start_temp} F")
+
+    set_edits = [e for e in (meta.get("events", []) or []) if e.get("type") == "set_change"]
+    st.markdown("**Set temp edits**")
+    if set_edits:
+        for e in set_edits:
+            t_text = _fmt_mmss(float(e.get("t_sec", 0.0) or 0.0))
+            from_v = e.get("from_value")
+            to_v = e.get("value")
+            if from_v is None:
+                st.write(f"- {t_text}: set to {to_v} F")
+            else:
+                st.write(f"- {t_text}: {from_v} -> {to_v} F")
+    else:
+        st.caption("No set-temp edits recorded.")
+
+    try:
+        c = _load_curve(rid)
+        elapsed = float(c["t_sec"].max()) if (not c.empty and "t_sec" in c.columns) else 0.0
+    except Exception:
+        elapsed = 0.0
+    if elapsed <= 0:
+        elapsed = _parse_mmss_to_sec(str(meta.get("total_roast_time", "") or ""))
+
+    phase_stats = _compute_phase_stats(meta.get("events", []) or [], elapsed)
+    st.markdown("**Phase ratios**")
+    c1, c2, c3, c4 = st.columns(4)
+    for col, (label, (pct, secs)) in zip([c1, c2, c3, c4], phase_stats.items()):
+        col.metric(label, f"{pct:.1f}%", _fmt_mmss(secs))
+
+    st.markdown("**Weight loss**")
+    raw_w = float(meta.get("raw_weight_g", 0.0) or 0.0)
+    roasted_w = float(meta.get("roasted_weight_g", 0.0) or 0.0)
+    loss_pct = meta.get("weight_loss_pct", None)
+    if raw_w > 0 and roasted_w > 0 and loss_pct is not None:
+        st.write(f"{raw_w - roasted_w:.1f} g ({float(loss_pct):.1f}%)")
+    else:
+        st.caption("Weight loss not available.")
+
+    notes_key = f"library_notes_{rid}"
+    notes_value = st.text_area(
+        "Notes",
+        value=str(meta.get("notes", "") or ""),
+        key=notes_key,
+        height=120,
+    )
+    if st.button("Save notes", key=f"save_notes_{rid}"):
+        update_roast_notes(rid, notes_value)
+        _load_library_rows.clear()
+        st.success("Notes saved")
+        st.rerun()
+
+
 library_df, meta_map = _load_library_rows()
 
 if library_df.empty:
@@ -219,113 +342,106 @@ if filtered.empty:
     st.warning("No roast logs match your filters.")
     st.stop()
 
-st.subheader("Roast Logs")
-
-visible_cols = [
-    "display_name",
-    "saved_at",
-    "origin",
-    "process",
-    "variety",
-    "altitude_m",
-    "raw_weight_g",
-    "roasted_weight_g",
-    "weight_loss_pct",
-]
-show_df = filtered[visible_cols].copy()
-show_df = show_df.rename(
-    columns={
-        "display_name": "Roast",
-        "saved_at": "Saved at",
-        "origin": "Origin",
-        "process": "Process",
-        "variety": "Variety",
-        "altitude_m": "Altitude (m)",
-        "raw_weight_g": "Raw (g)",
-        "roasted_weight_g": "Roasted (g)",
-        "weight_loss_pct": "Loss %",
-    }
-)
-st.dataframe(show_df, use_container_width=True, hide_index=True)
-
-# Same-bean version picker for quick navigation.
-st.sidebar.divider()
-st.sidebar.subheader("Same-Bean Versions")
-bean_version_titles = [x for x in sorted(filtered["bean_title"].dropna().unique().tolist()) if x]
-selected_version = None
-if bean_version_titles:
-    bean_for_versions = st.sidebar.selectbox("Bean title", bean_version_titles, index=0)
-    version_options = [rid for rid, _meta in list_roasts_for_bean(bean_for_versions)]
-    version_labels = {
-        rid: next((row["display_name"] for _, row in filtered.iterrows() if row["roast_id"] == rid), rid)
-        for rid in version_options
-    }
-
-    if version_options:
-        selected_version = st.sidebar.selectbox(
-            "Versions (newest to oldest)",
-            version_options,
-            index=0,
-            format_func=lambda rid: version_labels.get(rid, rid),
-        )
-else:
-    st.sidebar.caption("No named bean titles in current filter.")
-
 label_map = {row["roast_id"]: row["display_name"] for _, row in filtered.iterrows()}
-plot_choices = filtered["roast_id"].tolist()
-default_selection = [selected_version] if selected_version else plot_choices[:1]
+all_plot_choices = library_df["roast_id"].tolist()
+filtered_plot_choices = filtered["roast_id"].tolist()
 
-selected_roasts = st.multiselect(
-    "Select roast(s) to view/compare",
-    options=plot_choices,
-    default=default_selection,
+# Primary roast selection (shown when compare is not explicitly applied)
+st.sidebar.divider()
+st.sidebar.subheader("Current Roast")
+if "library_current_roast" not in st.session_state:
+    st.session_state.library_current_roast = filtered_plot_choices[0] if filtered_plot_choices else "(none)"
+if st.session_state.library_current_roast not in filtered_plot_choices:
+    st.session_state.library_current_roast = filtered_plot_choices[0] if filtered_plot_choices else "(none)"
+if "library_current_applied" not in st.session_state:
+    st.session_state.library_current_applied = st.session_state.library_current_roast
+if st.session_state.library_current_applied not in filtered_plot_choices:
+    st.session_state.library_current_applied = st.session_state.library_current_roast
+
+current_roast = st.sidebar.selectbox(
+    "Current roast log",
+    options=filtered_plot_choices,
+    index=filtered_plot_choices.index(st.session_state.library_current_roast) if filtered_plot_choices else 0,
     format_func=lambda rid: label_map.get(rid, rid),
 )
+st.session_state.library_current_roast = current_roast
+if st.sidebar.button("Apply and view selected curve"):
+    st.session_state.library_current_applied = current_roast
+    st.rerun()
 
-if not selected_roasts:
-    st.info("Select at least one roast to plot.")
-    st.stop()
+st.sidebar.divider()
+st.sidebar.subheader("Compare Roasts")
+compare_options = ["(none)"] + all_plot_choices
+default_first = all_plot_choices[0] if all_plot_choices else "(none)"
 
-if len(selected_roasts) == 2:
-    left_col, right_col = st.columns(2)
-    left_id, right_id = selected_roasts
+if "library_compare_first" not in st.session_state:
+    st.session_state.library_compare_first = default_first
+if "library_compare_second" not in st.session_state:
+    st.session_state.library_compare_second = "(none)"
+if "library_compare_applied_first" not in st.session_state:
+    st.session_state.library_compare_applied_first = "(none)"
+if "library_compare_applied_second" not in st.session_state:
+    st.session_state.library_compare_applied_second = "(none)"
 
-    with left_col:
-        left_fig = _build_compare_figure([left_id], label_map)
-        left_fig.update_layout(title=label_map.get(left_id, left_id), showlegend=False)
-        st.plotly_chart(left_fig, use_container_width=True, config={"displayModeBar": False})
+if st.session_state.library_compare_first not in compare_options:
+    st.session_state.library_compare_first = default_first
+if st.session_state.library_compare_second not in compare_options:
+    st.session_state.library_compare_second = "(none)"
 
-    with right_col:
-        right_fig = _build_compare_figure([right_id], label_map)
-        right_fig.update_layout(title=label_map.get(right_id, right_id), showlegend=False)
-        st.plotly_chart(right_fig, use_container_width=True, config={"displayModeBar": False})
+first_roast = st.sidebar.selectbox(
+    "First roast curve",
+    options=compare_options,
+    index=compare_options.index(st.session_state.library_compare_first) if st.session_state.library_compare_first in compare_options else 0,
+    format_func=lambda rid: "(none)" if rid == "(none)" else label_map.get(rid, rid),
+    key="library_compare_first",
+)
+second_roast = st.sidebar.selectbox(
+    "Second roast curve",
+    options=compare_options,
+    index=compare_options.index(st.session_state.library_compare_second) if st.session_state.library_compare_second in compare_options else 0,
+    format_func=lambda rid: "(none)" if rid == "(none)" else label_map.get(rid, rid),
+    key="library_compare_second",
+)
+
+if st.sidebar.button("Apply compare"):
+    st.session_state.library_compare_applied_first = first_roast
+    st.session_state.library_compare_applied_second = second_roast
+    st.rerun()
+
+applied_first = st.session_state.library_compare_applied_first
+applied_second = st.session_state.library_compare_applied_second
+
+is_two_compare = (
+    applied_first != "(none)"
+    and applied_second != "(none)"
+    and applied_first != applied_second
+)
+
+if is_two_compare:
+    st.subheader("Compare Roasts")
+    left_panel, right_panel = st.columns(2)
+    left_meta = meta_map.get(applied_first, {})
+    right_meta = meta_map.get(applied_second, {})
+
+    with left_panel:
+        st.markdown(f"### {label_map.get(applied_first, applied_first)}")
+        st.caption(_fmt_saved_at(str(left_meta.get("saved_at", "") or "")))
+        _render_roast_panel(applied_first, label_map, meta_map)
+
+    with right_panel:
+        st.markdown(f"### {label_map.get(applied_second, applied_second)}")
+        st.caption(_fmt_saved_at(str(right_meta.get("saved_at", "") or "")))
+        _render_roast_panel(applied_second, label_map, meta_map)
 else:
-    fig = _build_compare_figure(selected_roasts, label_map)
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    # Single-view mode: show current applied roast (or applied compare fallback if set).
+    if applied_first != "(none)" and applied_second == "(none)":
+        active_rid = applied_first
+    elif applied_second != "(none)" and applied_first == "(none)":
+        active_rid = applied_second
+    else:
+        active_rid = st.session_state.library_current_applied
 
-if len(selected_roasts) == 1:
-    rid = selected_roasts[0]
-    st.subheader("Selected Roast Details")
-    meta = meta_map.get(rid, {})
-    cols = st.columns(4)
-    cols[0].metric("Coffee", label_map.get(rid, rid))
-    cols[1].metric("Origin", str(meta.get("origin", "")))
-    cols[2].metric("Process", str(meta.get("process", "")))
-    cols[3].metric("Total roast time", str(meta.get("total_roast_time", "")))
-
-    notes_key = f"library_notes_{rid}"
-    notes_value = st.text_area(
-        "Roast notes",
-        value=str(meta.get("notes", "") or ""),
-        key=notes_key,
-        height=120,
-        help="Edit and save notes for this roast curve.",
-    )
-    if st.button("Save notes", key=f"save_notes_{rid}"):
-        update_roast_notes(rid, notes_value)
-        _load_library_rows.clear()
-        st.success("Notes saved")
-        st.rerun()
-
-    with st.expander("Full metadata"):
-        st.json(meta)
+    active_meta = meta_map.get(active_rid, {})
+    st.markdown(f"## {label_map.get(active_rid, active_rid)}")
+    st.caption(_fmt_saved_at(str(active_meta.get("saved_at", "") or "")))
+    _render_roast_panel(active_rid, label_map, meta_map)
