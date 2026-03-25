@@ -283,35 +283,4 @@ selected_roasts = st.multiselect(
 )
 
 if not selected_roasts:
-    st.info("Select at least one roast to plot.")
-    st.stop()
-
-if len(selected_roasts) == 2:
-    left_col, right_col = st.columns(2)
-    left_id, right_id = selected_roasts
-
-    with left_col:
-        left_fig = _build_compare_figure([left_id], label_map)
-        left_fig.update_layout(title=label_map.get(left_id, left_id), showlegend=False)
-        st.plotly_chart(left_fig, use_container_width=True, config={"displayModeBar": False})
-
-    with right_col:
-        right_fig = _build_compare_figure([right_id], label_map)
-        right_fig.update_layout(title=label_map.get(right_id, right_id), showlegend=False)
-        st.plotly_chart(right_fig, use_container_width=True, config={"displayModeBar": False})
-else:
-    fig = _build_compare_figure(selected_roasts, label_map)
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-
-if len(selected_roasts) == 1:
-    rid = selected_roasts[0]
-    st.subheader("Selected Roast Details")
-    meta = meta_map.get(rid, {})
-    cols = st.columns(4)
-    cols[0].metric("Coffee", label_map.get(rid, rid))
-    cols[1].metric("Origin", str(meta.get("origin", "")))
-    cols[2].metric("Process", str(meta.get("process", "")))
-    cols[3].metric("Total roast time", str(meta.get("total_roast_time", "")))
-
-    with st.expander("Full metadata"):
-        st.json(meta)
+    st.info("Select at least one roast to plo

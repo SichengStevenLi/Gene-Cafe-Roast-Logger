@@ -32,8 +32,6 @@ from storage import (
     load_roast_meta,
     load_camera_config,
     save_camera_config,
-    list_bean_profile_titles,
-    get_bean_profile,
     save_bean_profile,
     list_roasts_for_bean,
     next_batch_number,
@@ -311,12 +309,32 @@ def main():
     st.sidebar.header("Roast Setup")
 
     # Bean metadata inputs (before roast)
-    bean_profile_choices = ["(none)"] + list_bean_profile_titles()
-    selected_profile = st.sidebar.selectbox("Saved bean profile", bean_profile_choices, index=0)
-    load_profile_btn = st.sidebar.button("Load bean profile")
+    roast_profile_ids = list_roasts()
+    roast_profile_labels: dict[str, str] = {}
+    for rid in roast_profile_ids:
+        try:
+            meta = load_roast_meta(rid)
+            roast_profile_labels[rid] = str(meta.get("bean_title", "") or meta.get("title", "") or rid)
+        except Exception:
+            roast_profile_labels[rid] = rid
+
+    bean_profile_choices = ["(none)"] + roast_profile_ids
+    selected_profile = st.sidebar.selectbox(
+        "Saved bean profile",
+        bean_profile_choices,
+        index=0,
+        format_func=lambda rid: "(none)" if rid == "(none)" else roast_profile_labels.get(rid, rid),
+        disabled=st.session_state.roast_active,
+    )
+    st.sidebar.caption("Type in the dropdown to narrow the list.")
+    st.sidebar.caption("Press Load Bean Profile to automatically fill in the fields.")
+    load_profile_btn = st.sidebar.button("Load bean profile", disabled=st.session_state.roast_active)
+
+    if st.session_state.roast_active:
+        st.sidebar.caption("Bean profile is locked while roast is active.")
 
     if load_profile_btn and selected_profile != "(none)":
-        p = get_bean_profile(selected_profile) or {}
+        p = load_roast_meta(selected_profile) or {}
 
         def _set_choice_and_custom(value: str, options: list[str], choice_key: str, custom_key: str):
             clean = (value or "").strip()
@@ -330,7 +348,7 @@ def main():
                 st.session_state[choice_key] = "(select)"
                 st.session_state[custom_key] = ""
 
-        st.session_state.bean_title_input = str(p.get("bean_title", "") or "")
+        st.session_state.bean_title_input = str(p.get("bean_title", "") or p.get("title", "") or selected_profile)
         _set_choice_and_custom(str(p.get("origin", "") or ""), ORIGIN_OPTIONS, "origin_choice_input", "origin_custom_input")
         _set_choice_and_custom(str(p.get("bean_category", "") or ""), TYPE_OPTIONS, "type_choice_input", "type_custom_input")
         _set_choice_and_custom(str(p.get("variety", "") or ""), VARIETY_OPTIONS, "variety_choice_input", "variety_custom_input")
@@ -339,6 +357,11 @@ def main():
         st.session_state.altitude_input = int(p.get("altitude_m", 0) or 0)
         st.session_state.is_decaf_input = bool(p.get("is_decaf", False))
         st.session_state.raw_weight_input = float(p.get("raw_weight_g", 0.0) or 0.0)
+
+        # Apply initial set temp from selected roast profile metadata.
+        profile_set_temp = int(p.get("preheat_temp", 0) or 0)
+        st.session_state.current_set_temp_input = profile_set_temp
+        st.session_state.set_temp = profile_set_temp if profile_set_temp > 0 else None
         st.rerun()
 
     bean_title = st.sidebar.text_input("Coffee name", value=st.session_state.get("bean_title_input", ""), key="bean_title_input")
