@@ -1,0 +1,8 @@
+t_sec,raw_read,view_mode,temp_current,set_temp,confidence
+0.0,409.0,SET_VIEW,409.0,409,1.0
+0.745,,UNKNOWN,,409,0.0
+5.897,,UNKNOWN,,409,0.0
+11.03,,UNKNOWN,,409,0.0
+16.368,,UNKNOWN,,409,0.0
+21.559,,UNKNOWN,,409,0.0
+26.76,,UNKNOWN,,409,0.0

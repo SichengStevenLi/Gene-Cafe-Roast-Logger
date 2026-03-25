@@ -2,11 +2,6 @@ import numpy as np
 import pandas as pd
 import importlib
 
-
-def _c_to_f(temp_c: float) -> float:
-    return (temp_c * 9.0 / 5.0) + 32.0
-
-
 def _format_mmss(seconds: float) -> str:
     total = int(round(seconds))
     m, s = divmod(max(0, total), 60)
@@ -50,7 +45,7 @@ class RoastPlotter:
         if not df.empty and "temp_current" in df.columns:
             plot_df = df.dropna(subset=["temp_current"]).sort_values("t_sec")
             if not plot_df.empty:
-                y_cur_f = plot_df["temp_current"].astype(float).apply(_c_to_f)
+                y_cur_f = plot_df["temp_current"].astype(float)
                 x_smooth, y_smooth = _smoothed_line(plot_df["t_sec"].to_numpy(), y_cur_f.to_numpy())
                 fig.add_trace(
                     go.Scatter(
@@ -82,7 +77,7 @@ class RoastPlotter:
         if ref_df is not None and not ref_df.empty and "temp_current" in ref_df.columns:
             r = ref_df.dropna(subset=["temp_current"]).sort_values("t_sec")
             if not r.empty:
-                y_ref_f = r["temp_current"].astype(float).apply(_c_to_f)
+                y_ref_f = r["temp_current"].astype(float)
                 x_ref_smooth, y_ref_smooth = _smoothed_line(r["t_sec"].to_numpy(), y_ref_f.to_numpy())
                 fig.add_trace(
                     go.Scatter(
@@ -97,11 +92,11 @@ class RoastPlotter:
                 )
                 max_temp_f = max(max_temp_f, float(y_ref_f.max()) + 10.0)
 
-        # Set-temp change vertical markers
-        for e in events or []:
-            if e.get("type") == "set_change":
-                x = e.get("t_sec", 0)
-                fig.add_vline(x=x, line_width=1, line_color="gray", opacity=0.35)
+        set_change_events = [e for e in (events or []) if e.get("type") == "set_change"]
+        if set_change_events:
+            set_event_values = [float(e.get("value")) for e in set_change_events if e.get("value") is not None]
+            if set_event_values:
+                max_temp_f = max(max_temp_f, max(set_event_values) + 10.0)
 
         # Roast stage markers
         yellow_t = None
@@ -136,6 +131,29 @@ class RoastPlotter:
             fig.add_vline(x=crack_t, line_width=2, line_color="#6b3f1d", opacity=0.95)
             # Development phase: first crack -> end
             fig.add_vrect(x0=crack_t, x1=self.xmax_sec, fillcolor="#7a4a2a", opacity=0.22, line_width=0)
+
+        # Set-temp change vertical markers with hover details.
+        for e in set_change_events:
+            x = float(e.get("t_sec", 0.0))
+            to_temp = e.get("value")
+            from_temp = e.get("from_value")
+            time_text = _format_mmss(x)
+            if from_temp is None:
+                change_text = f"Set temp: {to_temp} F"
+            else:
+                change_text = f"Set temp: {from_temp} -> {to_temp} F"
+
+            fig.add_trace(
+                go.Scatter(
+                    x=[x, x],
+                    y=[300.0, max_temp_f],
+                    mode="lines",
+                    line={"color": "rgba(80, 80, 80, 0.35)", "width": 2},
+                    name="Set change",
+                    showlegend=False,
+                    hovertemplate=f"Time: {time_text}<br>{change_text}<extra></extra>",
+                )
+            )
 
         tick_vals = list(range(0, self.xmax_sec + 1, 30))
         tick_text = [_format_mmss(t) for t in tick_vals]

@@ -27,6 +27,7 @@ from storage import (
     ensure_data_dirs,
     make_roast_id,
     save_roast_session,
+    update_roasted_weight,
     list_roasts,
     load_roast_curve,
     load_roast_meta,
@@ -130,8 +131,8 @@ def init_state():
         st.session_state.events = []   # set temp change events
     if "set_temp" not in st.session_state:
         st.session_state.set_temp = None
-    if "preheat_temp" not in st.session_state:
-        st.session_state.preheat_temp = None
+    if "current_set_temp_input" not in st.session_state:
+        st.session_state.current_set_temp_input = 0
     if "classifier" not in st.session_state:
         st.session_state.classifier = TempClassifier()
     if "camera" not in st.session_state:
@@ -158,6 +159,8 @@ def init_state():
         st.session_state.final_total_roast_time = ""
     if "end_confirm_prev_running" not in st.session_state:
         st.session_state.end_confirm_prev_running = False
+    if "last_saved_roast_id" not in st.session_state:
+        st.session_state.last_saved_roast_id = None
 
 # Get elapsed seconds since roast start, or 0 if not started
 def current_elapsed_sec() -> float:
@@ -231,7 +234,7 @@ def _compute_phase_stats(events: list[dict], elapsed_sec: float) -> dict[str, tu
 
     if elapsed <= 0:
         return {
-            "Drying": (100.0, 0.0),
+            "Drying": (0.0, 0.0),
             "Yellowing": (0.0, 0.0),
             "Maillard": (0.0, 0.0),
             "Development": (0.0, 0.0),
@@ -313,16 +316,7 @@ def main():
     roi_w = st.sidebar.number_input("ROI w", min_value=10, value=320, step=10)
     roi_h = st.sidebar.number_input("ROI h", min_value=10, value=180, step=10)
 
-    st.sidebar.divider()
-
-    preheat_temp = st.sidebar.number_input("Preheat set temp(F)", min_value=0, value=200, step=1)
-    st.session_state.preheat_temp = int(preheat_temp)
-
-    set_temp_input = st.sidebar.number_input("Current set temp(F)", min_value=0, value=200, step=1)
-    new_set_temp = int(set_temp_input)
-
     colA, colB = st.sidebar.columns(2)
-    apply_set = colA.button("Apply set temp(F)")
     reset_session = colB.button("Reset session")
 
     st.sidebar.divider()
@@ -339,8 +333,11 @@ def main():
         ("Appearance", bool(appearance.strip()) and appearance != "(select)", "Appearance is required"),
         ("Processing method", bool(process.strip()) and process != "(select)", "Processing method is required"),
         ("Raw weight", float(raw_weight) > 0, "Raw weight must be greater than 0"),
-        ("Preheat temp", int(preheat_temp) > 0, "Preheat set temp must be greater than 0"),
-        ("Current set temp", int(new_set_temp) > 0, "Current set temp must be greater than 0"),
+        (
+            "Current set temp",
+            isinstance(st.session_state.set_temp, int) and st.session_state.set_temp > 0,
+            "Set and apply current set temp before starting",
+        ),
         ("Camera", camera_ok, camera_msg),
         ("OCR", ocr_ready, "OCR must be configured before start"),
     ]
@@ -350,33 +347,21 @@ def main():
         st.sidebar.caption("Start requirements:")
         for label, ok, _ in requirement_checks:
             status = "PASS" if ok else "MISSING"
-            st.sidebar.write(f"- {label}: {status}")
+            bg = "rgba(20, 163, 74, 0.32)" if ok else "rgba(248, 81, 73, 0.08)"
+            border = "rgba(21, 128, 61, 0.75)" if ok else "rgba(248, 81, 73, 0.25)"
+            st.sidebar.markdown(
+                (
+                    f"<div style='background:{bg}; border:1px solid {border}; "
+                    "padding:6px 8px; border-radius:6px; margin-bottom:6px;'>"
+                    f"<strong>{label}</strong>: {status}</div>"
+                ),
+                unsafe_allow_html=True,
+            )
 
         if unmet_requirements:
             st.sidebar.warning("Fix missing requirements before starting.")
         else:
             st.sidebar.success("Ready to start")
-
-    start_btn = st.sidebar.button(
-        "Start logging",
-        type="primary",
-        disabled=st.session_state.roast_active or len(unmet_requirements) > 0,
-    )
-
-    st.sidebar.divider()
-    st.sidebar.subheader("Roast Controls")
-    pause_resume_label = "Pause roast" if st.session_state.running else "Resume roast"
-    pause_resume_btn = st.sidebar.button(
-        pause_resume_label,
-        type="secondary",
-        disabled=not st.session_state.roast_active,
-    )
-
-    end_roast_btn = st.sidebar.button(
-        "End roast",
-        type="primary",
-        disabled=not st.session_state.roast_active,
-    )
 
     st.sidebar.divider()
     st.sidebar.header("Reference curve (optional)")
@@ -414,6 +399,39 @@ def main():
         else:
             st.sidebar.info("No saved roasts yet to compare.")
 
+
+    start_btn = st.sidebar.button(
+        "Start logging",
+        type="primary",
+        disabled=st.session_state.roast_active or len(unmet_requirements) > 0,
+    )
+
+    st.sidebar.divider()
+    st.sidebar.subheader("Roast Controls")
+    st.sidebar.divider()
+    set_temp_input = st.sidebar.number_input(
+        "Current set temp(F)",
+        min_value=0,
+        value=int(st.session_state.current_set_temp_input),
+        step=1,
+        key="current_set_temp_input",
+    )
+    new_set_temp = int(set_temp_input)
+    apply_set = st.sidebar.button("Apply set temp(F)")
+
+    pause_resume_label = "Pause roast" if st.session_state.running else "Resume roast"
+    pause_resume_btn = st.sidebar.button(
+        pause_resume_label,
+        type="secondary",
+        disabled=not st.session_state.roast_active,
+    )
+
+    end_roast_btn = st.sidebar.button(
+        "End roast",
+        type="primary",
+        disabled=not st.session_state.roast_active,
+    )
+
     # ---- Control actions ----
     if reset_session:
         st.session_state.running = False
@@ -444,15 +462,22 @@ def main():
         st.session_state.final_total_roast_time = ""
         st.session_state.end_confirm_prev_running = False
         st.session_state.roast_id = None
+        st.session_state.last_saved_roast_id = None
         st.rerun()
 
     # Apply set temp immediately when "Apply" button is pressed, even if not currently running. This allows the classifier to use the updated set temp for its logic right away.
     if apply_set:
+        prev_set_temp = st.session_state.set_temp
         st.session_state.set_temp = new_set_temp
         # Event marker
-        if st.session_state.running and st.session_state.start_epoch is not None:
+        if st.session_state.roast_active and st.session_state.start_epoch is not None:
             st.session_state.events.append(
-                {"t_sec": current_elapsed_sec(), "type": "set_change", "value": new_set_temp}
+                {
+                    "t_sec": current_elapsed_sec(),
+                    "type": "set_change",
+                    "value": new_set_temp,
+                    "from_value": prev_set_temp,
+                }
             )
 
     # Start logging: initialize state, open camera, and add initial sample with set temp as current temp (x=0 anchor)
@@ -551,7 +576,7 @@ def main():
                     raw_weight_g=float(raw_weight),
                     roasted_weight_g=float(st.session_state.final_roasted_weight),
                     total_roast_time=st.session_state.final_total_roast_time,
-                    preheat_temp=int(st.session_state.preheat_temp or 0),
+                    preheat_temp=int(st.session_state.set_temp or 0),
                     is_decaf=bool(is_decaf),
                     bean_category=bean_type_value if bean_type_value != "(select)" else "",
                     variety=variety_value if variety_value != "(select)" else "",
@@ -563,6 +588,7 @@ def main():
                 if not end_df.empty and disabled_ids:
                     end_df = end_df.loc[~end_df.index.isin(disabled_ids)].reset_index(drop=True)
                 save_roast_session(meta=meta, curve_df=end_df, events=st.session_state.events)
+                st.session_state.last_saved_roast_id = meta.roast_id
 
                 st.session_state.running = False
                 st.session_state.roast_active = False
@@ -585,6 +611,39 @@ def main():
                 else:
                     st.success(f"Saved roast: {meta.roast_id}")
                 st.rerun()
+
+    if (not st.session_state.roast_active) and st.session_state.last_saved_roast_id:
+        st.sidebar.divider()
+        st.sidebar.subheader("Post-roast weight")
+        try:
+            latest_meta = load_roast_meta(st.session_state.last_saved_roast_id)
+            raw_saved = float(latest_meta.get("raw_weight_g", 0.0) or 0.0)
+            roasted_saved = float(latest_meta.get("roasted_weight_g", 0.0) or 0.0)
+
+            post_weight = st.sidebar.number_input(
+                "Enter roasted weight after cooling (g)",
+                min_value=0.0,
+                value=roasted_saved,
+                step=0.1,
+                key="post_roasted_weight_input",
+            )
+
+            if raw_saved > 0 and post_weight > 0:
+                loss_g = raw_saved - post_weight
+                loss_pct = (loss_g / raw_saved) * 100.0
+                if loss_g >= 0:
+                    st.sidebar.info(f"Weight loss: {loss_g:.1f} g ({loss_pct:.1f}%)")
+                else:
+                    st.sidebar.warning(
+                        f"Roasted weight is {abs(loss_g):.1f} g above raw ({abs(loss_pct):.1f}% gain). Check entries."
+                    )
+
+            if st.sidebar.button("Save post-roast weight", key="save_post_roast_weight"):
+                update_roasted_weight(st.session_state.last_saved_roast_id, float(post_weight))
+                st.sidebar.success("Post-roast weight saved")
+                st.rerun()
+        except Exception as e:
+            st.sidebar.warning(f"Could not load latest roast meta for weight update: {e}")
 
     # ---- Main layout ----
     left, right = st.columns([3.2, 1.0])

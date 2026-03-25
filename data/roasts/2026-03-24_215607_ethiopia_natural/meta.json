@@ -1,0 +1,34 @@
+{
+  "roast_id": "2026-03-24_215607_ethiopia_natural",
+  "origin": "Ethiopia",
+  "bean_type": "Arabica / Heirloom",
+  "altitude_m": 1000,
+  "process": "Natural",
+  "raw_weight_g": 100.0,
+  "roasted_weight_g": 0.0,
+  "total_roast_time": "0:29",
+  "preheat_temp": 409,
+  "is_decaf": false,
+  "bean_category": "Arabica",
+  "variety": "Heirloom",
+  "bean_appearance": "Medium Beans",
+  "weight_loss_pct": null,
+  "saved_at": "2026-03-24T21:56:41.039299",
+  "events": [
+    {
+      "t_sec": 17.78829002380371,
+      "type": "yellowing_start",
+      "value": 1
+    },
+    {
+      "t_sec": 23.555095911026,
+      "type": "browning_start",
+      "value": 1
+    },
+    {
+      "t_sec": 25.80279278755188,
+      "type": "first_crack",
+      "value": 1
+    }
+  ]
+}

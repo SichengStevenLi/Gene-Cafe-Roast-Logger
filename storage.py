@@ -81,3 +81,21 @@ def load_roast_meta(roast_id: str) -> dict:
     path = os.path.join(roast_path(roast_id), "meta.json")
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def update_roasted_weight(roast_id: str, roasted_weight_g: float) -> dict:
+    path = os.path.join(roast_path(roast_id), "meta.json")
+    with open(path, "r", encoding="utf-8") as f:
+        meta = json.load(f)
+
+    meta["roasted_weight_g"] = float(roasted_weight_g)
+    raw_weight = float(meta.get("raw_weight_g", 0.0) or 0.0)
+    if raw_weight > 0 and float(roasted_weight_g) > 0:
+        meta["weight_loss_pct"] = 100.0 * (raw_weight - float(roasted_weight_g)) / raw_weight
+    else:
+        meta["weight_loss_pct"] = None
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    return meta

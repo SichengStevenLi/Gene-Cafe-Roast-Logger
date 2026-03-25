@@ -29,4 +29,179 @@ def _process_profile(label: str) -> tuple[str | None, str | None]:
         return "natural", modifier
 
     # If the label is experimental/modifier-heavy, infer hidden base process if present.
-    if any(token in text for token in ["anaerobic", "c
+    if any(token in text for token in ["anaerobic", "coferment", "cofermentation", "experimental", "carbonic maceration", "other"]):
+        if "honey" in text or "semi-washed" in text:
+            return "honey", modifier
+        if "wet hulled" in text:
+            return "wet hulled", modifier
+        if "washed" in text and "semi-washed" not in text:
+            return "washed", modifier
+        if "natural" in text:
+            return "natural", modifier
+
+    return None, modifier
+
+
+def _normalize_process_family(label: str) -> str | None:
+    family, _modifier = _process_profile(label)
+    return family
+
+
+def recommend_roasts(
+    origin: str,
+    altitude: int,
+    process: str,
+    appearance: str,
+    raw_weight_g: float,
+    is_decaf: bool,
+    variety: str,
+    limit: int = 5,
+):
+    """
+    Default base weights (out of 100):
+    - Processing: 40
+    - Altitude: 25
+    - Bean appearance/size: 20
+    - Variety: 10
+    - Origin: 5
+
+    Additional priority boosts:
+    - Gesha-first behavior (conditional)
+    - Decaf matching
+    """
+    roast_entries = [(rid, load_roast_meta(rid)) for rid in list_roasts()]
+    results = []
+
+    current_process_label = (process or "").strip().lower()
+    current_process_family, current_process_modifier = _process_profile(process)
+    available_process_labels = {
+        str(meta.get("process", "")).strip().lower()
+        for _, meta in roast_entries
+        if str(meta.get("process", "")).strip()
+    }
+
+    available_process_families = {
+        family
+        for _, meta in roast_entries
+        for family in [_normalize_process_family(str(meta.get("process", "")))]
+        if family is not None
+    }
+
+    available_modifier_base_pairs = {
+        _process_profile(str(meta.get("process", "")))
+        for _, meta in roast_entries
+    }
+
+    has_exact_process_history = bool(current_process_label) and current_process_label in available_process_labels
+
+    # Honey can fall back to Washed when there are no Honey references.
+    effective_process_family = current_process_family
+    effective_process_modifier = current_process_modifier
+
+    if (not has_exact_process_history) and current_process_family == "honey" and "honey" not in available_process_families and "washed" in available_process_families:
+        effective_process_family = "washed"
+
+    # Bare anaerobic falls back to other anaerobic-labelled roasts first.
+    if (not has_exact_process_history) and current_process_modifier == "anaerobic" and current_process_family is None:
+        effective_process_modifier = "anaerobic"
+
+    # If an anaerobic+base combo has no history, fall back to its base family.
+    if (
+        not has_exact_process_history
+        and current_process_modifier == "anaerobic"
+        and current_process_family is not None
+        and (current_process_family, current_process_modifier) not in available_modifier_base_pairs
+    ):
+        effective_process_modifier = None
+
+    current_variety = (variety or "").strip().lower()
+    current_is_gesha = current_variety in {"gesha"}
+
+    for rid, meta in roast_entries:
+        score = 0.0
+
+        # Variety from newer schema; fallback to legacy bean_type split.
+        meta_variety = str(meta.get("variety", "")).strip().lower()
+        if not meta_variety:
+            legacy = str(meta.get("bean_type", "")).strip()
+            if "/" in legacy:
+                meta_variety = legacy.split("/", 1)[1].strip().lower()
+
+        # If current roast is Gesha, prioritize historical Gesha roasts first.
+        if current_is_gesha:
+            if meta_variety in {"gesha"}:
+                score += 420
+            else:
+                score -= 200
+        
+        # Highest priority: decaf should recommend decaf, non-decaf should recommend non-decaf.
+        meta_decaf = bool(meta.get("is_decaf", False))
+        if meta_decaf == bool(is_decaf):
+            score += 300
+        else:
+            score -= 300
+
+        meta_process_label = str(meta.get("process", "")).strip().lower()
+        meta_process_family, meta_process_modifier = _process_profile(str(meta.get("process", "")))
+
+        # If this exact entered process exists in history, prefer exact label matches.
+        if has_exact_process_history:
+            if current_process_label and meta_process_label == current_process_label:
+                score += 40
+        else:
+            # Otherwise use smart fallback:
+            # 1) modifier+base when available
+            # 2) bare modifier-only match for labels like 'Anaerobic'
+            # 3) base family fallback
+            if (
+                effective_process_modifier is not None
+                and effective_process_family is not None
+                and meta_process_modifier == effective_process_modifier
+                and meta_process_family == effective_process_family
+            ):
+                score += 40
+            elif (
+                effective_process_modifier is not None
+                and effective_process_family is None
+                and meta_process_modifier == effective_process_modifier
+            ):
+                score += 40
+            elif effective_process_family and meta_process_family == effective_process_family:
+                score += 40
+
+        # Altitude closeness contributes up to 25 points.
+        try:
+            alt2 = int(meta.get("altitude_m", 0))
+            if altitude > 0 and alt2 > 0:
+                altitude_ratio = max(0.0, 1.0 - abs(alt2 - altitude) / float(altitude))
+                score += altitude_ratio * 25.0
+        except Exception:
+            pass
+
+        # Bean appearance / size
+        meta_appearance = str(meta.get("bean_appearance", "")).strip().lower()
+        if appearance and meta_appearance == appearance.strip().lower():
+            score += 20
+
+        # Variety
+        if current_variety and meta_variety == current_variety:
+            score += 10
+
+        # Origin
+        if origin and meta.get("origin", "").strip().lower() == origin.strip().lower():
+            score += 5
+
+        # Weight closeness ratio is a tie-break signal.
+        try:
+            rw2 = float(meta.get("raw_weight_g", 0.0))
+            if raw_weight_g > 0 and rw2 > 0:
+                ratio_closeness = max(0.0, 1.0 - abs(rw2 - raw_weight_g) / raw_weight_g)
+                score += ratio_closeness * 8.0
+        except Exception:
+            pass
+
+        if score > 0:
+            results.append((rid, score))
+
+    results.sort(key=lambda x: x[1], reverse=True)
+    return results[:limit]
