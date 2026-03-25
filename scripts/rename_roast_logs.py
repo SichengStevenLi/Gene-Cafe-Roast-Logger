@@ -1,3 +1,15 @@
+""" Remaming script to rename roast log folders to a naming standard and update metadata.
+- It reads all roast records' titles, normalizes them for comparison, and groups them by
+  bean title.
+- It assigns batch numbers and target names based on the bean title and existing batches,
+  following a naming strategy Title + batch number
+  (e.g., "Ethiopia" for single batch, "Ethiopia #2" for the second batch).
+
+  - If no bean title is present, it derives one from origin + process + variety.
+
+"""
+
+
 #!/usr/bin/env python3
 from __future__ import annotations
 
@@ -10,7 +22,8 @@ from pathlib import Path
 from typing import Optional
 
 
-DATA_ROOT = Path("data/roasts")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DATA_ROOT = PROJECT_ROOT / "data" / "roasts"
 META_FILENAME = "meta.json"
 
 
@@ -26,18 +39,21 @@ class RoastRecord:
     total_for_bean: int = 1
     new_name: str = ""
 
-
+# reads all roast records' titles
+# make the title to lowe case and remove extra spaces for comparison
 def normalize_title(title: str) -> str:
     return re.sub(r"\s+", " ", (title or "").strip().lower())
 
-
+# removing and replacing special characters for safe file paths
 def safe_title_for_path(title: str) -> str:
     clean = re.sub(r"\s+", " ", (title or "").strip())
     clean = re.sub(r"[\\/:*?\"<>|]", "-", clean)
     clean = clean.strip(" .")
     return clean or "Untitled Coffee"
 
-
+# Parse the saved_at timestamp from the metadata, returning a datetime object or None if parsing fails.
+# example: if saved_at is "2024-06-01T12:34:56", it will return a datetime object representing that timestamp. 
+# If saved_at is missing or not in a valid format, it will return None.
 def parse_saved_at(meta: dict) -> Optional[datetime]:
     raw = str(meta.get("saved_at", "") or "").strip()
     if not raw:
@@ -47,16 +63,26 @@ def parse_saved_at(meta: dict) -> Optional[datetime]:
     except Exception:
         return None
 
-
+# Generate a target roast name based on the bean title, batch number, and total batches for that bean.
+# If there is only one batch for the bean, it returns the cleaned title.(no #)
+# If there are multiple batches, it appends the batch number to the title (e.g., "Ethiopia #2").
 def bean_title_for_record(meta: dict, fallback_name: str) -> str:
     title = str(meta.get("bean_title", "") or "").strip()
     if title:
         return title
 
-    # Fallback for very old entries that do not have bean_title in metadata.
-    return fallback_name
+    # Fallback when bean_title is missing: origin process variety.
+    origin = str(meta.get("origin", "") or "").strip() or "Unknown Origin"
+    process = str(meta.get("process", "") or "").strip() or "Unknown Process"
+    variety = str(meta.get("variety", "") or "").strip() or "Unknown Variety"
+    derived = " ".join([origin, process, variety]).strip()
 
+    # Last-resort fallback for malformed metadata.
+    return derived or fallback_name
 
+# Generate the target roast name based on the bean title and batch number, following the naming strategy:
+# - If there is only one batch for the bean, return the cleaned title (e.g., "Ethiopia").
+# - If there are multiple batches, return the cleaned title with the batch number appended (e.g., "Ethiopia #2").
 def target_roast_name(bean_title: str, batch_number: int, total_for_bean: int) -> str:
     """
     Naming strategy (edit this function for future schema changes):
@@ -68,7 +94,7 @@ def target_roast_name(bean_title: str, batch_number: int, total_for_bean: int) -
         return base
     return f"{base} #{int(batch_number)}"
 
-
+# Load roast records from the given root directory, returning a list of RoastRecord objects containing metadata and paths for each roast entry found in the directory.
 def load_records(root: Path) -> list[RoastRecord]:
     records: list[RoastRecord] = []
     if not root.exists() or not root.is_dir():
@@ -163,7 +189,9 @@ def update_metadata(plans: list[tuple[RoastRecord, Path]], apply_changes: bool) 
         meta_path = target_path / META_FILENAME
         meta_path.write_text(json.dumps(new_meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
-
+# Summarize planned changes, printing out the renames and metadata updates that will be applied.
+# If apply_changes is False, it only prints the planned changes without modifying any files. 
+# If apply_changes is True, it executes the renames and metadata updates.
 def summarize(plans: list[tuple[RoastRecord, Path]], apply_changes: bool) -> None:
     mode = "APPLY" if apply_changes else "DRY-RUN"
     print(f"[{mode}] Found {len(plans)} roast entries.")
@@ -186,24 +214,36 @@ def summarize(plans: list[tuple[RoastRecord, Path]], apply_changes: bool) -> Non
 
 
 def main() -> None:
+    # Argument parsing for root directory and apply flag. By default, it runs in dry-run mode, only printing planned changes without modifying any files. 
     parser = argparse.ArgumentParser(description="Rename roast log folders to a naming standard and update metadata.")
+    # The --root argument allows specifying the root directory containing roast logs (default: data/roasts).
     parser.add_argument("--root", default=str(DATA_ROOT), help="Roasts root directory (default: data/roasts)")
+    # The --apply flag allows executing the planned changes. Without this flag, the script runs in dry-run mode.
     parser.add_argument("--apply", action="store_true", help="Apply changes. Without this flag, runs as dry-run.")
     args = parser.parse_args()
 
-    root = Path(args.root)
+    root = Path(args.root).expanduser().resolve()
+    print(f"Scanning roast root: {root}")
     records = load_records(root)
+    # if records is empty
     if not records:
         print("No roast entries found.")
         return
 
+    # Assign batch numbers and target names based on bean titles and existing batches
+    # following the naming strategy defined in target_roast_name.
     assign_batch_and_names(records)
     plans = plan_renames(records)
 
+    # Summarize planned changes. If --apply is not set, it only prints the planned renames and metadata updates without modifying any files. If --apply is set, it executes the renames and metadata updates.
     summarize(plans, apply_changes=args.apply)
     if not args.apply:
         return
 
+    # renames the folders according to the planned changes
+    # using a two-phase rename to avoid collisions. 
+    # It first renames all folders to temporary names,
+    #  then renames them to their final target names.
     apply_renames(plans, apply_changes=True)
     update_metadata(plans, apply_changes=True)
     print("[APPLY] Rename and metadata update complete.")

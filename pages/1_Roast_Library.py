@@ -21,14 +21,18 @@ def _fmt_mmss(seconds: float) -> str:
     m, s = divmod(total, 60)
     return f"{m}:{s:02d}"
 
-
+# Safe title for filesystem paths, without batch number.
 @st.cache_data(show_spinner=False)
+
 def _load_library_rows() -> tuple[pd.DataFrame, dict[str, dict]]:
+    # calls the list_roasts and load_roast_meta functions from storage.py to build a DataFrame of roast metadata for the library view, along with a map of roast_id to metadata dict for quick lookup when building the table and details view
     roast_ids = list_roasts()
+    # meta_map: roast_id -> metadata dict for quick lookup when building the table and details view
     meta_map: dict[str, dict] = {}
     title_counts: dict[str, int] = {}
 
     # First pass: load metadata and count bean-title occurrences.
+    # for each roast id, it calls load_roast_meta which reads meta.json.
     for rid in roast_ids:
         try:
             meta = load_roast_meta(rid)
@@ -41,6 +45,7 @@ def _load_library_rows() -> tuple[pd.DataFrame, dict[str, dict]]:
             key = _norm_title_key(title)
             title_counts[key] = title_counts.get(key, 0) + 1
 
+    # Second pass: build rows with display names and parsed metadata.
     rows = []
     for rid in roast_ids:
         if rid not in meta_map:
@@ -91,13 +96,14 @@ def _load_library_rows() -> tuple[pd.DataFrame, dict[str, dict]]:
 
 
 @st.cache_data(show_spinner=False)
+# calls load_roast_curve from storage.py to read the roast curve data for a given roast_id
 def _load_curve(roast_id: str) -> pd.DataFrame:
     return load_roast_curve(roast_id)
 
 
 def _build_compare_figure(selected_roasts: list[str], labels: dict[str, str]) -> go.Figure:
     fig = go.Figure()
-    max_temp = 480.0
+    max_temp = 482.0
     max_t = 0.0
 
     for rid in selected_roasts:
@@ -280,8 +286,22 @@ if not selected_roasts:
     st.info("Select at least one roast to plot.")
     st.stop()
 
-fig = _build_compare_figure(selected_roasts, label_map)
-st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+if len(selected_roasts) == 2:
+    left_col, right_col = st.columns(2)
+    left_id, right_id = selected_roasts
+
+    with left_col:
+        left_fig = _build_compare_figure([left_id], label_map)
+        left_fig.update_layout(title=label_map.get(left_id, left_id), showlegend=False)
+        st.plotly_chart(left_fig, use_container_width=True, config={"displayModeBar": False})
+
+    with right_col:
+        right_fig = _build_compare_figure([right_id], label_map)
+        right_fig.update_layout(title=label_map.get(right_id, right_id), showlegend=False)
+        st.plotly_chart(right_fig, use_container_width=True, config={"displayModeBar": False})
+else:
+    fig = _build_compare_figure(selected_roasts, label_map)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 if len(selected_roasts) == 1:
     rid = selected_roasts[0]
