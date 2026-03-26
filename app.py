@@ -45,6 +45,8 @@ APP_TITLE = "Gene Café Roast Logger"
 SAMPLE_INTERVAL_SEC = 5.0
 # Run OCR at a non-1s cadence so we don't phase-lock with a 1s display toggle.
 OCR_READ_INTERVAL_SEC = 0.7
+# Small preview tick for smoother camera updates without pegging CPU.
+PREVIEW_REFRESH_SEC = 0.05
 PLOT_WINDOW_SEC = 15 * 60
 
 ORIGIN_OPTIONS = [
@@ -207,6 +209,27 @@ def init_state():
         st.session_state.raw_weight_input = 0.0
     if "roast_notes_input" not in st.session_state:
         st.session_state.roast_notes_input = ""
+    if "cam_index_input" not in st.session_state:
+        _cam_cfg = load_camera_config()
+        st.session_state.cam_index_input = int(_cam_cfg["cam_index"])
+        st.session_state.roi_x_input = int(_cam_cfg["roi_x"])
+        st.session_state.roi_y_input = int(_cam_cfg["roi_y"])
+        st.session_state.roi_w_input = int(_cam_cfg["roi_w"])
+        st.session_state.roi_h_input = int(_cam_cfg["roi_h"])
+    if "camera_ready_cache_key" not in st.session_state:
+        st.session_state.camera_ready_cache_key = None
+    if "camera_ready_cache_ts" not in st.session_state:
+        st.session_state.camera_ready_cache_ts = 0.0
+    if "camera_ready_cache_ok" not in st.session_state:
+        st.session_state.camera_ready_cache_ok = False
+    if "camera_ready_cache_msg" not in st.session_state:
+        st.session_state.camera_ready_cache_msg = "Camera check pending"
+    if "detected_cameras" not in st.session_state:
+        st.session_state.detected_cameras = []
+    if "camera_scan_done" not in st.session_state:
+        st.session_state.camera_scan_done = False
+    if "camera_select_input" not in st.session_state:
+        st.session_state.camera_select_input = int(st.session_state.cam_index_input)
 
 # Get elapsed seconds since roast start, or 0 if not started
 def current_elapsed_sec() -> float:
@@ -235,6 +258,38 @@ def _camera_ready(index: int, roi: tuple[int, int, int, int]) -> tuple[bool, str
     if frame is None:
         return False, "Camera is not readable with current index/ROI."
     return True, "OK"
+
+
+def _detect_camera_indices(max_index: int = 6) -> list[int]:
+    found: list[int] = []
+    for idx in range(max(1, int(max_index))):
+        cap = cv2.VideoCapture(idx)
+        if not cap.isOpened():
+            cap.release()
+            continue
+        ok, frame = cap.read()
+        cap.release()
+        if ok and frame is not None:
+            found.append(idx)
+    return found
+
+
+def _camera_ready_cached(index: int, roi: tuple[int, int, int, int], ttl_sec: float = 1.0) -> tuple[bool, str]:
+    key = (int(index), int(roi[0]), int(roi[1]), int(roi[2]), int(roi[3]))
+    now = time.time()
+    cache_key = st.session_state.get("camera_ready_cache_key")
+    cache_ts = float(st.session_state.get("camera_ready_cache_ts", 0.0))
+    if cache_key == key and (now - cache_ts) < float(ttl_sec):
+        return bool(st.session_state.get("camera_ready_cache_ok", False)), str(
+            st.session_state.get("camera_ready_cache_msg", "Camera check pending")
+        )
+
+    ok, msg = _camera_ready(index=index, roi=roi)
+    st.session_state.camera_ready_cache_key = key
+    st.session_state.camera_ready_cache_ts = now
+    st.session_state.camera_ready_cache_ok = ok
+    st.session_state.camera_ready_cache_msg = msg
+    return ok, msg
 
 
 def _valid_mmss(s: str) -> bool:
@@ -466,16 +521,53 @@ def main():
 
     st.sidebar.divider()
 
-    # Camera selection — load last saved settings as defaults
-    _cam_cfg = load_camera_config()
-    cam_index = st.sidebar.number_input("Camera index (usually 0)", min_value=0, value=int(_cam_cfg["cam_index"]), step=1)
+    # Camera detection and selection
+    if not st.session_state.camera_scan_done:
+        st.session_state.detected_cameras = _detect_camera_indices(max_index=8)
+        st.session_state.camera_scan_done = True
+
+    detect_cols = st.sidebar.columns(2)
+    detect_cols[0].caption("Camera")
+    if detect_cols[1].button("Detect", disabled=st.session_state.roast_active):
+        st.session_state.detected_cameras = _detect_camera_indices(max_index=8)
+
+    detected_cams = sorted(set(int(x) for x in st.session_state.detected_cameras))
+    current_cam = int(st.session_state.cam_index_input)
+
+    if detected_cams:
+        cam_options = sorted(set(detected_cams + [current_cam]))
+        selected_cam = int(st.session_state.get("camera_select_input", current_cam))
+        if selected_cam not in cam_options:
+            selected_cam = current_cam if current_cam in cam_options else cam_options[0]
+            st.session_state.camera_select_input = int(selected_cam)
+
+        cam_index = st.sidebar.selectbox(
+            "Detected camera",
+            options=cam_options,
+            index=cam_options.index(int(st.session_state.camera_select_input)),
+            format_func=lambda x: f"Camera {x}",
+            key="camera_select_input",
+            disabled=st.session_state.roast_active,
+        )
+        st.session_state.cam_index_input = int(cam_index)
+        st.sidebar.caption("Detected: " + ", ".join(str(x) for x in detected_cams))
+    else:
+        st.sidebar.caption("No camera auto-detected. Use manual index.")
+        cam_index = st.sidebar.number_input(
+            "Camera index (manual)",
+            min_value=0,
+            step=1,
+            key="cam_index_input",
+            disabled=st.session_state.roast_active,
+        )
+        st.session_state.camera_select_input = int(cam_index)
 
     # ROI calibration
     st.sidebar.caption("ROI (pixels): x, y, w, h")
-    roi_x = st.sidebar.number_input("ROI x", min_value=0, value=int(_cam_cfg["roi_x"]), step=1)
-    roi_y = st.sidebar.number_input("ROI y", min_value=0, value=int(_cam_cfg["roi_y"]), step=1)
-    roi_w = st.sidebar.number_input("ROI w", min_value=10, value=int(_cam_cfg["roi_w"]), step=10)
-    roi_h = st.sidebar.number_input("ROI h", min_value=10, value=int(_cam_cfg["roi_h"]), step=10)
+    roi_x = st.sidebar.number_input("ROI x", min_value=0, step=1, key="roi_x_input", disabled=st.session_state.roast_active)
+    roi_y = st.sidebar.number_input("ROI y", min_value=0, step=1, key="roi_y_input", disabled=st.session_state.roast_active)
+    roi_w = st.sidebar.number_input("ROI w", min_value=10, step=10, key="roi_w_input", disabled=st.session_state.roast_active)
+    roi_h = st.sidebar.number_input("ROI h", min_value=10, step=10, key="roi_h_input", disabled=st.session_state.roast_active)
     if st.sidebar.button("Save camera settings", help="Remember these ROI and camera values for next time"):
         save_camera_config(int(cam_index), int(roi_x), int(roi_y), int(roi_w), int(roi_h))
         st.sidebar.success("Camera settings saved.")
@@ -485,7 +577,7 @@ def main():
 
     st.sidebar.divider()
 
-    camera_ok, camera_msg = _camera_ready(
+    camera_ok, camera_msg = _camera_ready_cached(
         index=int(cam_index),
         roi=(int(roi_x), int(roi_y), int(roi_w), int(roi_h)),
     )
@@ -1048,7 +1140,6 @@ def main():
             if (
                 st.session_state.preview_camera is None
                 or st.session_state.preview_cam_index != requested_index
-                or st.session_state.preview_roi != requested_roi
             ):
                 if st.session_state.preview_camera:
                     try:
@@ -1057,6 +1148,10 @@ def main():
                         pass
                 st.session_state.preview_camera = Camera(index=requested_index, roi=requested_roi)
                 st.session_state.preview_cam_index = requested_index
+                st.session_state.preview_roi = requested_roi
+            elif st.session_state.preview_roi != requested_roi:
+                # Apply ROI changes without reopening the camera device.
+                st.session_state.preview_camera.roi = requested_roi
                 st.session_state.preview_roi = requested_roi
 
             frame, roi = st.session_state.preview_camera.read()
@@ -1079,6 +1174,7 @@ def main():
                 st.image(roi, channels="BGR", caption="ROI preview (what OCR reads)", width=300)
 
             if live_preview:
+                time.sleep(PREVIEW_REFRESH_SEC)
                 st.rerun()
         else:
             if st.session_state.preview_camera:

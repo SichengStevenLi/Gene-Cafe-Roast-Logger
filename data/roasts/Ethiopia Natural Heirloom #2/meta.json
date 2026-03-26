@@ -1,0 +1,27 @@
+{
+  "roast_id": "Ethiopia Natural Heirloom #2",
+  "bean_title": "Ethiopia Natural Heirloom",
+  "origin": "Ethiopia",
+  "bean_type": "Arabica / Heirloom",
+  "altitude_m": 1000,
+  "process": "Natural",
+  "raw_weight_g": 100.0,
+  "roasted_weight_g": 0.0,
+  "total_roast_time": "2:06",
+  "preheat_temp": 410,
+  "is_decaf": false,
+  "bean_category": "Arabica",
+  "variety": "Heirloom",
+  "bean_appearance": "Medium Beans",
+  "batch_number": 2,
+  "weight_loss_pct": null,
+  "saved_at": "2026-03-25T16:58:18.354668",
+  "events": [
+    {
+      "t_sec": 94.0418860912323,
+      "type": "yellowing_start",
+      "value": 1
+    }
+  ],
+  "notes": ""
+}
