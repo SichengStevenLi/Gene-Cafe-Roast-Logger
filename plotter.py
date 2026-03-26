@@ -196,46 +196,4 @@ class RoastPlotter:
                     y=[300.0, max_temp_f],
                     mode="lines",
                     line={"color": "rgba(80, 80, 80, 0.35)", "width": 2},
-                    name="Set change",
-                    showlegend=False,
-                    hovertemplate=f"Time: {time_text}<br>{change_text}<extra></extra>",
-                )
-            )
-
-        tick_vals = list(range(0, self.xmax_sec + 1, 30))
-        tick_text = [_format_mmss(t) for t in tick_vals]
-
-        fig.update_layout(
-            title="Roast curve",
-            paper_bgcolor="white",
-            plot_bgcolor="white",
-            font={"color": "black"},
-            title_font={"color": "black"},
-            xaxis={
-                "title": "Time (mm:ss)",
-                "range": [0, self.xmax_sec],
-                "tickmode": "array",
-                "tickvals": tick_vals,
-                "ticktext": tick_text,
-                "tickangle": 45,
-                #"titlefont": {"color": "black"},
-                "tickfont": {"color": "black"},
-                "gridcolor": "#e8e8e8",
-                "zerolinecolor": "#e8e8e8",
-            },
-            yaxis={
-                "title": "Temperature (F)",
-                "range": [300, max_temp_f],
-                #"titlefont": {"color": "black"},
-                "tickfont": {"color": "black"},
-                "gridcolor": "#e8e8e8",
-                "zerolinecolor": "#e8e8e8",
-            },
-            height=520,
-            legend={"orientation": "h", "y": 1.02, "x": 0.0, "font": {"color": "black"}},
-            margin={"l": 70, "r": 20, "t": 70, "b": 80},
-            hovermode="closest",
-            hoverlabel={"bgcolor": "white", "font_color": "black", "bordercolor": "#cccccc"},
-        )
-
-        return fig
+                    name="Set c
