@@ -1,3 +1,5 @@
+import time
+import platform
 import cv2
 from typing import Tuple
 
@@ -9,16 +11,63 @@ class Camera:
     roi = (x, y, w, h) in pixels, relative to the full frame.
     """
     def __init__(self, index: int = 0, roi: Tuple[int, int, int, int] = (0, 0, 320, 180)):
-        self.cap = cv2.VideoCapture(index)
+        self.index = int(index)
         self.roi = roi
+        self.cap = None
+        self._open_capture()
+
+    def _backend_candidates(self):
+        if platform.system().lower() == "darwin":
+            avf = getattr(cv2, "CAP_AVFOUNDATION", None)
+            if avf is not None:
+                return [avf, cv2.CAP_ANY]
+        return [cv2.CAP_ANY]
+
+    def _open_capture(self):
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+
+        for backend in self._backend_candidates():
+            cap = cv2.VideoCapture(self.index, backend)
+            if not cap.isOpened():
+                cap.release()
+                continue
+
+            # Small capture buffer helps reduce stale/laggy frames.
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+
+            self.cap = cap
+            return
 
     def read(self):
-        if not self.cap.isOpened():
-            return None, None
+        if self.cap is None or not self.cap.isOpened():
+            self._open_capture()
+            if self.cap is None or not self.cap.isOpened():
+                return None, None
 
         ok, frame = self.cap.read()
-        if not ok:
-            return None, None
+        if (not ok) or (frame is None):
+            # Recover once by reopening the device.
+            self._open_capture()
+            if self.cap is None or not self.cap.isOpened():
+                return None, None
+
+            # Some cameras need a short warmup after reopen.
+            for _ in range(2):
+                ok, frame = self.cap.read()
+                if ok and frame is not None:
+                    break
+                time.sleep(0.03)
+
+            if (not ok) or (frame is None):
+                return None, None
 
         x, y, w, h = self.roi
         h_frame, w_frame = frame.shape[:2]
