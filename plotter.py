@@ -29,7 +29,7 @@ class RoastPlotter:
     def __init__(self, xmax_sec: int = 15 * 60):
         self.xmax_sec = xmax_sec
 
-    def make_figure(self, df: pd.DataFrame, events: list[dict], ref_df: pd.DataFrame | None = None):
+    def make_figure(self, df: pd.DataFrame, events: list[dict], ref_df: pd.DataFrame | None = None, ref_events: list[dict] | None = None):
         try:
             go = importlib.import_module("plotly.graph_objects")
         except Exception as exc:
@@ -73,6 +73,39 @@ class RoastPlotter:
                     )
                 )
                 max_temp_f = max(max_temp_f, float(y_ref_f.max()) + 10.0)
+        # Reference stage markers (muted dashed lines from the reference roast)
+        if ref_events:
+            ref_yellow_t = None
+            ref_browning_t = None
+            ref_crack_t = None
+            for e in ref_events:
+                et = e.get("type")
+                if et == "yellowing_start" and ref_yellow_t is None:
+                    ref_yellow_t = float(e.get("t_sec", 0))
+                elif et == "browning_start" and ref_browning_t is None:
+                    ref_browning_t = float(e.get("t_sec", 0))
+                elif et == "first_crack" and ref_crack_t is None:
+                    ref_crack_t = float(e.get("t_sec", 0))
+
+            stage_info = [
+                (ref_yellow_t, "rgba(200, 165, 0, 0.55)", "Ref: Yellowing"),
+                (ref_browning_t, "rgba(160, 100, 40, 0.55)", "Ref: Browning"),
+                (ref_crack_t, "rgba(100, 55, 20, 0.65)", "Ref: 1st Crack"),
+            ]
+            for t_val, color, label in stage_info:
+                if t_val is not None:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=[t_val, t_val],
+                            y=[300.0, max_temp_f],
+                            mode="lines",
+                            name=label,
+                            line={"color": color, "width": 1.5, "dash": "dash"},
+                            showlegend=False,
+                            hovertemplate=f"{label}: {_format_mmss(t_val)}<extra></extra>",
+                        )
+                    )
+
 
         # Current temp points only where temp_current is not null
         if not df.empty and "temp_current" in df.columns:

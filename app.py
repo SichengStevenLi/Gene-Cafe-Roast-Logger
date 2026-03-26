@@ -129,6 +129,8 @@ PROCESS_OPTIONS = [
 # Note: for simplicity, all state is in session_state. 
 # In a more complex app, we might want to split into multiple pages or use a more robust state management approach.
 def init_state():
+    # Initialize all session state variables with defaults if they don't exist yet.
+    # running state starts when roast starts, not on app load, so default is False
     if "running" not in st.session_state:
         st.session_state.running = False
     if "start_epoch" not in st.session_state:
@@ -217,6 +219,8 @@ def init_state():
         st.session_state.raw_weight_input = 0.0
     if "roast_notes_input" not in st.session_state:
         st.session_state.roast_notes_input = ""
+    if "_clear_roast_notes_on_rerun" not in st.session_state:
+        st.session_state._clear_roast_notes_on_rerun = False
     if "cam_index_input" not in st.session_state:
         _cam_cfg = load_camera_config()
         st.session_state.cam_index_input = int(_cam_cfg["cam_index"])
@@ -707,6 +711,22 @@ def main():
             return t
         return f"{t} #{batch_no}"
 
+    def _stage_caption(rid: str) -> str:
+        """Return a short stage-times string like 'Y: 3:45  M: 6:10  1C: 8:30' from cached meta events."""
+        m = roast_meta_cache.get(rid, {})
+        evts = m.get("events") or []
+        yellow_t = next((float(e["t_sec"]) for e in evts if e.get("type") == "yellowing_start"), None)
+        browning_t = next((float(e["t_sec"]) for e in evts if e.get("type") == "browning_start"), None)
+        crack_t = next((float(e["t_sec"]) for e in evts if e.get("type") == "first_crack"), None)
+        parts = []
+        if yellow_t is not None:
+            parts.append(f"Y: {_format_mmss(yellow_t)}")
+        if browning_t is not None:
+            parts.append(f"M: {_format_mmss(browning_t)}")
+        if crack_t is not None:
+            parts.append(f"1C: {_format_mmss(crack_t)}")
+        return "  ".join(parts) if parts else ""
+
     # Precompute per-roast similarity so each selector can show a dynamic score text below it.
     _all_curve_scores: dict[str, float | None] = {}
     for rid in roasts:
@@ -742,6 +762,9 @@ def main():
             st.sidebar.caption(f"Match score: **{_ref_score:.1f}%**")
         else:
             st.sidebar.caption("Match score: N/A (decaf mismatch)")
+        _ref_stages = _stage_caption(ref_choice)
+        if _ref_stages:
+            st.sidebar.caption(f"Stages: {_ref_stages}")
 
     # Detect if the user just changed this widget and take ownership.
     if st.session_state.manual_ref_select != st.session_state._prev_manual_ref_select:
@@ -779,6 +802,9 @@ def main():
                 st.sidebar.caption(f"Match score: **{_same_score:.1f}%**")
             else:
                 st.sidebar.caption("Match score: N/A (decaf mismatch)")
+            _same_stages = _stage_caption(selected_same_bean_version)
+            if _same_stages:
+                st.sidebar.caption(f"Stages: {_same_stages}")
 
             if st.sidebar.button("Use selected same-bean version", key="use_same_bean_reference"):
                 st.session_state.reference_source = "same_bean"
@@ -833,6 +859,9 @@ def main():
         if st.session_state.reference_source == "suggested":
             st.session_state.reference_roast_id = selected_suggestion
         st.sidebar.caption(f"Match score: **{suggestion_scores[selected_suggestion]:.1f}%**")
+        _sug_stages = _stage_caption(selected_suggestion)
+        if _sug_stages:
+            st.sidebar.caption(f"Stages: {_sug_stages}")
 
 
     start_btn = st.sidebar.button(
@@ -852,6 +881,10 @@ def main():
     )
     new_set_temp = int(set_temp_input)
     apply_set = st.sidebar.button("Apply set temp(F)")
+
+    if st.session_state.get("_clear_roast_notes_on_rerun", False):
+        st.session_state.roast_notes_input = ""
+        st.session_state._clear_roast_notes_on_rerun = False
 
     st.sidebar.text_area(
         "Roast notes",
@@ -907,7 +940,7 @@ def main():
         st.session_state.end_confirm_prev_running = False
         st.session_state.roast_id = None
         st.session_state.last_saved_roast_id = None
-        st.session_state.roast_notes_input = ""
+        st.session_state._clear_roast_notes_on_rerun = True
         st.rerun()
 
     # Apply set temp immediately when "Apply" button is pressed, even if not currently running. This allows the classifier to use the updated set temp for its logic right away.
@@ -1127,13 +1160,19 @@ def main():
 
         # Reference curve underlay — only shown while roast is active (acts as a guide)
         ref_df = None
+        ref_events_overlay: list[dict] = []
         if st.session_state.roast_active and st.session_state.reference_roast_id:
             try:
                 ref_df = load_roast_curve(st.session_state.reference_roast_id)
             except Exception as e:
                 st.warning(f"Could not load reference curve: {e}")
+            try:
+                _ref_meta = load_roast_meta(st.session_state.reference_roast_id)
+                ref_events_overlay = _ref_meta.get("events") or []
+            except Exception:
+                pass
 
-        fig = plotter.make_figure(df=plot_df, events=st.session_state.events, ref_df=ref_df)
+        fig = plotter.make_figure(df=plot_df, events=st.session_state.events, ref_df=ref_df, ref_events=ref_events_overlay)
         live_plot_slot = st.empty()
         live_plot_slot.plotly_chart(
             fig,
