@@ -389,35 +389,30 @@ def main():
     st.sidebar.header("Roast Setup")
 
     # Bean metadata inputs (before roast)
-    roast_profile_ids = list_roasts()
+    # De-duplicate by bean title: show only the most recent roast per unique bean name.
+    # list_roasts() returns newest-first so the first seen per title is the latest batch.
+    _all_profile_ids = list_roasts()
     roast_profile_meta: dict[str, dict] = {}
     roast_profile_labels: dict[str, str] = {}
-    roast_profile_title_counts: dict[str, int] = {}
+    _seen_profile_titles: set[str] = set()
+    roast_profile_ids: list[str] = []
 
     def _norm_profile_title(title: str) -> str:
         return " ".join((title or "").strip().lower().split())
 
-    for rid in roast_profile_ids:
+    for rid in _all_profile_ids:
         try:
             meta = load_roast_meta(rid)
-            roast_profile_meta[rid] = meta
-            title = str(meta.get("bean_title", "") or meta.get("title", "") or "").strip()
-            if title:
-                key = _norm_profile_title(title)
-                roast_profile_title_counts[key] = roast_profile_title_counts.get(key, 0) + 1
         except Exception:
-            roast_profile_meta[rid] = {}
-
-    for rid in roast_profile_ids:
-        meta = roast_profile_meta.get(rid, {})
+            meta = {}
+        roast_profile_meta[rid] = meta
         title = str(meta.get("bean_title", "") or meta.get("title", "") or "").strip()
-        if not title:
-            roast_profile_labels[rid] = rid
+        key = _norm_profile_title(title) if title else rid
+        if key in _seen_profile_titles:
             continue
-
-        count = roast_profile_title_counts.get(_norm_profile_title(title), 0)
-        batch_no = int(meta.get("batch_number", 1) or 1)
-        roast_profile_labels[rid] = title if count <= 1 else f"{title} #{batch_no}"
+        _seen_profile_titles.add(key)
+        roast_profile_ids.append(rid)
+        roast_profile_labels[rid] = title if title else rid
 
     bean_profile_choices = ["(none)"] + roast_profile_ids
     selected_profile = st.sidebar.selectbox(
