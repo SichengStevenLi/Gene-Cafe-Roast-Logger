@@ -37,7 +37,7 @@ from storage import (
     next_batch_number,
     make_roast_log_name,
 )
-from recommend import recommend_roasts
+from recommend import recommend_roasts, score_from_meta_cache
 
 
 APP_TITLE = "Gene Café Roast Logger"
@@ -62,6 +62,7 @@ ORIGIN_OPTIONS = [
     "Panama",
     "El Salvador",
     "Honduras",
+    "Costa Rica",
     "Nicaragua",
     "Hawaii",
     "Indonesia",
@@ -179,6 +180,13 @@ def init_state():
         st.session_state.suggested_roasts = []  # list[(roast_id, score)]
     if "suggested_roast_choice" not in st.session_state:
         st.session_state.suggested_roast_choice = None
+    if "manual_ref_select" not in st.session_state:
+        st.session_state.manual_ref_select = "(none)"
+    if "_prev_manual_ref_select" not in st.session_state:
+        st.session_state._prev_manual_ref_select = "(none)"
+    if "reference_source" not in st.session_state:
+        # Tracks which section last set the reference roast: "manual" | "suggested" | "same_bean"
+        st.session_state.reference_source = None
     if "bean_title_input" not in st.session_state:
         st.session_state.bean_title_input = ""
     if "origin_choice_input" not in st.session_state:
@@ -699,30 +707,60 @@ def main():
             return t
         return f"{t} #{batch_no}"
 
+    # Precompute per-roast similarity so each selector can show a dynamic score text below it.
+    _all_curve_scores: dict[str, float | None] = {}
+    for rid in roasts:
+        _all_curve_scores[rid] = score_from_meta_cache(
+            rid=rid,
+            meta_cache=roast_meta_cache,
+            origin=origin,
+            altitude=int(altitude),
+            process=process,
+            appearance=appearance,
+            raw_weight_g=float(raw_weight),
+            is_decaf=bool(is_decaf),
+            bean_category=bean_type_value if bean_type_value != "(select)" else "",
+            variety=variety_value if variety_value != "(select)" else "",
+        )
+
     roast_choices = ["(none)"] + roasts
-    ref_default_index = roast_choices.index(st.session_state.reference_roast_id) if st.session_state.reference_roast_id in roast_choices else 0
+
+    # --- Section 1: Manual reference roast selector ---
+    # Uses its own state key so it never jumps when other sections update reference_roast_id.
     ref_choice = st.sidebar.selectbox(
         "Select reference roast",
         roast_choices,
-        index=ref_default_index,
+        key="manual_ref_select",
         format_func=lambda rid: "(none)" if rid == "(none)" else _roast_label(rid),
     )
 
-    # If a reference roast is selected, store it in session state to overlay in the plot
-    if ref_choice != "(none)":
-        st.session_state.reference_roast_id = ref_choice
+    if ref_choice == "(none)":
+        st.sidebar.caption("Match score: --")
     else:
-        st.session_state.reference_roast_id = None
+        _ref_score = _all_curve_scores.get(ref_choice)
+        if _ref_score is not None:
+            st.sidebar.caption(f"Match score: **{_ref_score:.1f}%**")
+        else:
+            st.sidebar.caption("Match score: N/A (decaf mismatch)")
 
-    # Detect exact same bean by title and offer quick-reference action.
+    # Detect if the user just changed this widget and take ownership.
+    if st.session_state.manual_ref_select != st.session_state._prev_manual_ref_select:
+        st.session_state._prev_manual_ref_select = st.session_state.manual_ref_select
+        st.session_state.reference_source = "manual"
+
+    if st.session_state.reference_source == "manual":
+        if ref_choice != "(none)":
+            st.session_state.reference_roast_id = ref_choice
+        else:
+            st.session_state.reference_roast_id = None
+
+    # --- Section 2: Same-bean version quick-picker ---
+    # Independent selector — only sets reference on explicit button click.
     bean_title_clean = bean_title.strip()
     if bean_title_clean:
         same_bean_versions = list_roasts_for_bean(bean_title_clean)
         if same_bean_versions:
             same_bean_ids = [rid for rid, _ in same_bean_versions]
-            default_same_idx = 0
-            if st.session_state.reference_roast_id in same_bean_ids:
-                default_same_idx = same_bean_ids.index(st.session_state.reference_roast_id)
 
             st.sidebar.info(
                 f"Detected the same bean in your history: {bean_title_clean}. "
@@ -732,17 +770,24 @@ def main():
             selected_same_bean_version = st.sidebar.selectbox(
                 "Same-bean roast versions (newest to oldest)",
                 same_bean_ids,
-                index=default_same_idx,
                 format_func=lambda rid: _roast_label(rid),
                 key="same_bean_versions_select",
             )
 
+            _same_score = _all_curve_scores.get(selected_same_bean_version)
+            if _same_score is not None:
+                st.sidebar.caption(f"Match score: **{_same_score:.1f}%**")
+            else:
+                st.sidebar.caption("Match score: N/A (decaf mismatch)")
+
             if st.sidebar.button("Use selected same-bean version", key="use_same_bean_reference"):
+                st.session_state.reference_source = "same_bean"
                 st.session_state.reference_roast_id = selected_same_bean_version
                 st.session_state.suggested_roast_choice = selected_same_bean_version
                 st.rerun()
 
-    # Suggest reference roasts if not in log (simple recommender)
+    # --- Section 3: Suggested compatible curves ---
+    # Only drives reference_roast_id when this section is the active source.
     if st.sidebar.button("Suggest similar roasts"):
         suggestions = recommend_roasts(
             origin=origin,
@@ -757,6 +802,7 @@ def main():
         )
         if suggestions:
             st.session_state.suggested_roasts = suggestions
+            st.session_state.reference_source = "suggested"
             current_options = [rid for rid, _ in suggestions]
             if st.session_state.suggested_roast_choice not in current_options:
                 st.session_state.suggested_roast_choice = current_options[0]
@@ -778,10 +824,15 @@ def main():
             "Suggested options",
             options=suggestion_options,
             index=suggestion_options.index(st.session_state.suggested_roast_choice),
-            format_func=lambda rid: f"{_roast_label(rid)} ({suggestion_scores[rid]:.1f}% match)",
+            format_func=lambda rid: _roast_label(rid),
         )
+        # Only update the active reference when this section owns it.
+        if selected_suggestion != st.session_state.suggested_roast_choice:
+            st.session_state.reference_source = "suggested"
         st.session_state.suggested_roast_choice = selected_suggestion
-        st.session_state.reference_roast_id = selected_suggestion
+        if st.session_state.reference_source == "suggested":
+            st.session_state.reference_roast_id = selected_suggestion
+        st.sidebar.caption(f"Match score: **{suggestion_scores[selected_suggestion]:.1f}%**")
 
 
     start_btn = st.sidebar.button(
@@ -1066,60 +1117,4 @@ def main():
             columns=["t_sec", "temp_current", "set_temp", "view_mode", "raw_read", "confidence"]
         )
 
-        disabled_ids = set(int(x) for x in st.session_state.disabled_point_ids)
-        if not df.empty:
-            df = df.copy()
-            df["point_id"] = df.index.astype(int)
-            plot_df = df.loc[~df["point_id"].isin(disabled_ids)].drop(columns=["point_id"])
-        else:
-            plot_df = df
-
-        # Reference curve underlay — only shown while roast is active (acts as a guide)
-        ref_df = None
-        if st.session_state.roast_active and st.session_state.reference_roast_id:
-            try:
-                ref_df = load_roast_curve(st.session_state.reference_roast_id)
-            except Exception as e:
-                st.warning(f"Could not load reference curve: {e}")
-
-        fig = plotter.make_figure(df=plot_df, events=st.session_state.events, ref_df=ref_df)
-        live_plot_slot = st.empty()
-        live_plot_slot.plotly_chart(
-            fig,
-            use_container_width=True,
-            config={"displayModeBar": False},
-            key="live_plot_chart",
-        )
-
-        if st.session_state.roast_active:
-            phase_elapsed = current_elapsed_sec()
-        elif not df.empty and "t_sec" in df.columns:
-            phase_elapsed = float(df["t_sec"].max())
-        else:
-            phase_elapsed = 0.0
-
-        phase_stats = _compute_phase_stats(st.session_state.events, phase_elapsed)
-        p1, p2, p3, p4 = st.columns(4)
-        for column, (label, (pct, secs)) in zip(
-            [p1, p2, p3, p4],
-            phase_stats.items(),
-        ):
-            column.metric(label, f"{pct:.1f}%", _format_mmss(secs))
-
-        # Stage markers: unlock sequentially and allow one click each.
-        yellow_evt = next((e for e in st.session_state.events if e.get("type") == "yellowing_start"), None)
-        browning_evt = next((e for e in st.session_state.events if e.get("type") == "browning_start"), None)
-        crack_evt = next((e for e in st.session_state.events if e.get("type") == "first_crack"), None)
-
-        st.caption("Roast stages")
-        s1, s2, s3 = st.columns(3)
-
-        yellow_btn = s1.button(
-            "Yellowing starts",
-            disabled=(not st.session_state.roast_active) or (not st.session_state.running) or (yellow_evt is not None),
-            key="btn_yellowing_start",
-        )
-        browning_btn = s2.button(
-            "Browning starts",
-            disabled=(
-                (not st.session_sta
+        disabled_ids = set(int(x) fo
