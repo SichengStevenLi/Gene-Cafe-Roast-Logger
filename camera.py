@@ -69,7 +69,7 @@ class Camera:
             if (not ok) or (frame is None):
                 return None, None
 
-        x, y, w, h = self.roi
+        x, y, w, h = self.roi 
         h_frame, w_frame = frame.shape[:2]
 
         # Clamp ROI safely
