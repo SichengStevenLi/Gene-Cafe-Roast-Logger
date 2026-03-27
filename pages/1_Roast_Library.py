@@ -291,4 +291,157 @@ def _render_roast_panel(rid: str, label_map: dict[str, str], meta_map: dict[str,
 library_df, meta_map = _load_library_rows()
 
 if library_df.empty:
-  
+    st.info("No roast logs found yet.")
+    st.stop()
+
+st.sidebar.header("Library Filters")
+search_text = st.sidebar.text_input("Search coffee name", value="")
+
+origin_options = ["(all)"] + sorted([x for x in library_df["origin"].dropna().unique().tolist() if x])
+process_options = ["(all)"] + sorted([x for x in library_df["process"].dropna().unique().tolist() if x])
+variety_options = ["(all)"] + sorted([x for x in library_df["variety"].dropna().unique().tolist() if x])
+bean_options = ["(all)"] + sorted([x for x in library_df["bean_title"].dropna().unique().tolist() if x])
+
+filter_origin = st.sidebar.selectbox("Origin", origin_options, index=0)
+filter_process = st.sidebar.selectbox("Process", process_options, index=0)
+filter_variety = st.sidebar.selectbox("Variety", variety_options, index=0)
+filter_bean = st.sidebar.selectbox("Coffee", bean_options, index=0)
+filter_decaf = st.sidebar.selectbox("Decaf", ["(all)", "Non-decaf", "Decaf"], index=0)
+
+# Optional date filter if dates exist.
+dates = [d for d in library_df["saved_date"].dropna().tolist() if d is not None]
+use_date_filter = st.sidebar.checkbox("Filter by date range", value=False)
+start_date = None
+end_date = None
+if use_date_filter and dates:
+    min_d, max_d = min(dates), max(dates)
+    start_date, end_date = st.sidebar.date_input("Saved date range", value=(min_d, max_d), min_value=min_d, max_value=max_d)
+
+# Apply filters.
+filtered = library_df.copy()
+
+if search_text.strip():
+    q = search_text.strip().lower()
+    filtered = filtered[filtered["display_name"].str.lower().str.contains(q, na=False)]
+if filter_origin != "(all)":
+    filtered = filtered[filtered["origin"] == filter_origin]
+if filter_process != "(all)":
+    filtered = filtered[filtered["process"] == filter_process]
+if filter_variety != "(all)":
+    filtered = filtered[filtered["variety"] == filter_variety]
+if filter_bean != "(all)":
+    filtered = filtered[filtered["bean_title"] == filter_bean]
+if filter_decaf == "Decaf":
+    filtered = filtered[filtered["decaf"] == True]
+elif filter_decaf == "Non-decaf":
+    filtered = filtered[filtered["decaf"] == False]
+if use_date_filter and start_date and end_date:
+    filtered = filtered[(filtered["saved_date"] >= start_date) & (filtered["saved_date"] <= end_date)]
+
+if filtered.empty:
+    st.warning("No roast logs match your filters.")
+    st.stop()
+
+label_map = {row["roast_id"]: row["display_name"] for _, row in filtered.iterrows()}
+all_plot_choices = library_df["roast_id"].tolist()
+filtered_plot_choices = filtered["roast_id"].tolist()
+
+# Primary roast selection (shown when compare is not explicitly applied)
+st.sidebar.divider()
+st.sidebar.subheader("Current Roast")
+if "library_current_roast" not in st.session_state:
+    st.session_state.library_current_roast = filtered_plot_choices[0] if filtered_plot_choices else "(none)"
+if st.session_state.library_current_roast not in filtered_plot_choices:
+    st.session_state.library_current_roast = filtered_plot_choices[0] if filtered_plot_choices else "(none)"
+if "library_current_applied" not in st.session_state:
+    st.session_state.library_current_applied = st.session_state.library_current_roast
+if st.session_state.library_current_applied not in filtered_plot_choices:
+    st.session_state.library_current_applied = st.session_state.library_current_roast
+
+current_roast = st.sidebar.selectbox(
+    "Current roast log",
+    options=filtered_plot_choices,
+    index=filtered_plot_choices.index(st.session_state.library_current_roast) if filtered_plot_choices else 0,
+    format_func=lambda rid: label_map.get(rid, rid),
+)
+st.session_state.library_current_roast = current_roast
+if st.sidebar.button("Apply and view selected curve"):
+    st.session_state.library_current_applied = current_roast
+    st.rerun()
+
+st.sidebar.divider()
+st.sidebar.subheader("Compare Roasts")
+compare_options = ["(none)"] + all_plot_choices
+default_first = all_plot_choices[0] if all_plot_choices else "(none)"
+
+if "library_compare_first" not in st.session_state:
+    st.session_state.library_compare_first = default_first
+if "library_compare_second" not in st.session_state:
+    st.session_state.library_compare_second = "(none)"
+if "library_compare_applied_first" not in st.session_state:
+    st.session_state.library_compare_applied_first = "(none)"
+if "library_compare_applied_second" not in st.session_state:
+    st.session_state.library_compare_applied_second = "(none)"
+
+if st.session_state.library_compare_first not in compare_options:
+    st.session_state.library_compare_first = default_first
+if st.session_state.library_compare_second not in compare_options:
+    st.session_state.library_compare_second = "(none)"
+
+first_roast = st.sidebar.selectbox(
+    "First roast curve",
+    options=compare_options,
+    index=compare_options.index(st.session_state.library_compare_first) if st.session_state.library_compare_first in compare_options else 0,
+    format_func=lambda rid: "(none)" if rid == "(none)" else label_map.get(rid, rid),
+    key="library_compare_first",
+)
+second_roast = st.sidebar.selectbox(
+    "Second roast curve",
+    options=compare_options,
+    index=compare_options.index(st.session_state.library_compare_second) if st.session_state.library_compare_second in compare_options else 0,
+    format_func=lambda rid: "(none)" if rid == "(none)" else label_map.get(rid, rid),
+    key="library_compare_second",
+)
+
+if st.sidebar.button("Apply compare"):
+    st.session_state.library_compare_applied_first = first_roast
+    st.session_state.library_compare_applied_second = second_roast
+    st.rerun()
+
+applied_first = st.session_state.library_compare_applied_first
+applied_second = st.session_state.library_compare_applied_second
+
+is_two_compare = (
+    applied_first != "(none)"
+    and applied_second != "(none)"
+    and applied_first != applied_second
+)
+
+if is_two_compare:
+    st.subheader("Compare Roasts")
+    left_panel, right_panel = st.columns(2)
+    left_meta = meta_map.get(applied_first, {})
+    right_meta = meta_map.get(applied_second, {})
+
+    with left_panel:
+        st.markdown(f"### {label_map.get(applied_first, applied_first)}")
+        st.caption(_fmt_saved_at(str(left_meta.get("saved_at", "") or "")))
+        _render_roast_panel(applied_first, label_map, meta_map)
+
+    with right_panel:
+        st.markdown(f"### {label_map.get(applied_second, applied_second)}")
+        st.caption(_fmt_saved_at(str(right_meta.get("saved_at", "") or "")))
+        _render_roast_panel(applied_second, label_map, meta_map)
+else:
+    # Single-view mode: show current applied roast (or applied compare fallback if set).
+    if applied_first != "(none)" and applied_second == "(none)":
+        active_rid = applied_first
+    elif applied_second != "(none)" and applied_first == "(none)":
+        active_rid = applied_second
+    else:
+        active_rid = st.session_state.library_current_applied
+
+    active_meta = meta_map.get(active_rid, {})
+    st.markdown(f"## {label_map.get(active_rid, active_rid)}")
+    st.caption(_fmt_saved_at(str(active_meta.get("saved_at", "") or "")))
+    _render_roast_panel(active_rid, label_map, meta_map)
