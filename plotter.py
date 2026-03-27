@@ -196,4 +196,58 @@ class RoastPlotter:
                 go.Scatter(
                     x=[x, x],
                     y=[y_axis_min_f, max_temp_f],
-                    mode="line
+                    mode="lines",
+                    line={"color": "rgba(80, 80, 80, 0.35)", "width": 2},
+                    name="Set change",
+                    showlegend=False,
+                    hovertemplate=f"Time: {time_text}<br>{change_text}<extra></extra>",
+                )
+            )
+
+        y_axis_max_f = max_temp_f + 20.0
+
+        tick_vals = list(range(0, display_xmax_sec + 1, 30))
+        tick_text = [_format_mmss(t) for t in tick_vals]
+
+        fig.update_layout(
+            # title="Roast curve",
+            paper_bgcolor="white",
+            plot_bgcolor="white",
+            font={"color": "black"},
+            title_font={"color": "black"},
+            xaxis={
+                "title": {"text": "Time (mm:ss)", "font": {"color": "black"}},
+                "range": [0, display_xmax_sec],
+                "tickmode": "array",
+                "tickvals": tick_vals,
+                "ticktext": tick_text,
+                "tickangle": 45,
+                "tickfont": {"color": "black"},
+                "showline": True,
+                "linecolor": "#222222",
+                "linewidth": 1,
+                "showgrid": True,
+                "gridwidth": 1,
+                "gridcolor": "#e8e8e8",
+                "zeroline": False,
+            },
+            yaxis={
+                "title": {"text": "Temperature (F)", "font": {"color": "black"}},
+                "range": [y_axis_min_f, y_axis_max_f],
+                "tickfont": {"color": "black"},
+                "showline": True,
+                "linecolor": "#222222",
+                "linewidth": 1,
+                "showgrid": True,
+                "gridwidth": 1,
+                "gridcolor": "#e8e8e8",
+                "zeroline": False,
+            },
+            height=520,
+            legend={"orientation": "h", "y": 1.02, "x": 0.0, "font": {"color": "black"}},
+            margin={"l": 70, "r": 20, "t": 70, "b": 80},
+            hovermode="closest",
+            hoverlabel={"bgcolor": "white", "font_color": "black", "bordercolor": "#cccccc"},
+        )
+
+        return fig
