@@ -39,6 +39,8 @@ class RoastPlotter:
 
         fig = go.Figure()
 
+        display_xmax_sec = max(int(self.xmax_sec), 15 * 60)
+        y_axis_min_f = 250.0
         max_temp_f = 480.0
 
         # Reference underlay — drawn first so it sits beneath the live curve
@@ -97,7 +99,7 @@ class RoastPlotter:
                     fig.add_trace(
                         go.Scatter(
                             x=[t_val, t_val],
-                            y=[300.0, max_temp_f],
+                            y=[y_axis_min_f, max_temp_f],
                             mode="lines",
                             name=label,
                             line={"color": color, "width": 1.5, "dash": "dash"},
@@ -170,14 +172,14 @@ class RoastPlotter:
 
         # Maillard phase: browning start -> first crack (or to end if first crack not marked yet)
         if browning_t is not None:
-            maillard_end = crack_t if (crack_t is not None and crack_t >= browning_t) else self.xmax_sec
+            maillard_end = crack_t if (crack_t is not None and crack_t >= browning_t) else display_xmax_sec
             if maillard_end > browning_t:
                 fig.add_vrect(x0=browning_t, x1=maillard_end, fillcolor="#c08a52", opacity=0.18, line_width=0)
 
         if crack_t is not None:
             fig.add_vline(x=crack_t, line_width=2, line_color="#6b3f1d", opacity=0.95)
             # Development phase: first crack -> end
-            fig.add_vrect(x0=crack_t, x1=self.xmax_sec, fillcolor="#7a4a2a", opacity=0.22, line_width=0)
+            fig.add_vrect(x0=crack_t, x1=display_xmax_sec, fillcolor="#7a4a2a", opacity=0.22, line_width=0)
 
         # Set-temp change vertical markers with hover details.
         for e in set_change_events:
@@ -193,49 +195,5 @@ class RoastPlotter:
             fig.add_trace(
                 go.Scatter(
                     x=[x, x],
-                    y=[300.0, max_temp_f],
-                    mode="lines",
-                    line={"color": "rgba(80, 80, 80, 0.35)", "width": 2},
-                    name="Set change",
-                    showlegend=False,
-                    hovertemplate=f"Time: {time_text}<br>{change_text}<extra></extra>",
-                )
-            )
-
-        tick_vals = list(range(0, self.xmax_sec + 1, 30))
-        tick_text = [_format_mmss(t) for t in tick_vals]
-
-        fig.update_layout(
-            title="Roast curve",
-            paper_bgcolor="white",
-            plot_bgcolor="white",
-            font={"color": "black"},
-            title_font={"color": "black"},
-            xaxis={
-                "title": "Time (mm:ss)",
-                "range": [0, self.xmax_sec],
-                "tickmode": "array",
-                "tickvals": tick_vals,
-                "ticktext": tick_text,
-                "tickangle": 45,
-                #"titlefont": {"color": "black"},
-                "tickfont": {"color": "black"},
-                "gridcolor": "#e8e8e8",
-                "zerolinecolor": "#e8e8e8",
-            },
-            yaxis={
-                "title": "Temperature (F)",
-                "range": [300, max_temp_f],
-                #"titlefont": {"color": "black"},
-                "tickfont": {"color": "black"},
-                "gridcolor": "#e8e8e8",
-                "zerolinecolor": "#e8e8e8",
-            },
-            height=520,
-            legend={"orientation": "h", "y": 1.02, "x": 0.0, "font": {"color": "black"}},
-            margin={"l": 70, "r": 20, "t": 70, "b": 80},
-            hovermode="closest",
-            hoverlabel={"bgcolor": "white", "font_color": "black", "bordercolor": "#cccccc"},
-        )
-
-        return fig
+                    y=[y_axis_min_f, max_temp_f],
+                    mode="line
