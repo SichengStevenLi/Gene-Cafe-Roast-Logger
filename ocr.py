@@ -6,6 +6,56 @@ import numpy as np
 
 _PYTESSERACT = None
 
+
+def _clean_binary(binary_img: np.ndarray) -> list[np.ndarray]:
+    kernel_small = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    kernel_med = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+
+    opened = cv2.morphologyEx(binary_img, cv2.MORPH_OPEN, kernel_small)
+    closed = cv2.morphologyEx(binary_img, cv2.MORPH_CLOSE, kernel_small)
+    eroded = cv2.erode(closed, kernel_small, iterations=1)
+    denoised = cv2.medianBlur(binary_img, 3)
+    softened = cv2.morphologyEx(denoised, cv2.MORPH_OPEN, kernel_med)
+
+    return [binary_img, opened, closed, eroded, softened]
+
+
+def _prepare_ocr_variants(roi_bgr) -> list[np.ndarray]:
+    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+
+    # Upscaling and local contrast normalization help primitive seven-segment displays,
+    # especially when bloom makes lit segments bleed into neighboring dark areas.
+    gray = cv2.resize(gray, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+
+    kernel_emphasis = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+    bright_segments = cv2.morphologyEx(enhanced, cv2.MORPH_TOPHAT, kernel_emphasis)
+    dark_segments = cv2.morphologyEx(enhanced, cv2.MORPH_BLACKHAT, kernel_emphasis)
+
+    base_variants = [
+        cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
+        cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1],
+        cv2.adaptiveThreshold(
+            enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 4
+        ),
+        cv2.adaptiveThreshold(
+            enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 4
+        ),
+        cv2.threshold(bright_segments, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
+        cv2.threshold(dark_segments, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
+    ]
+
+    variants: list[np.ndarray] = []
+    for img in base_variants:
+        variants.extend(_clean_binary(img))
+        variants.extend(_clean_binary(cv2.bitwise_not(img)))
+
+    return variants
+
 # pytesseract reads Tesseract OCR results from images.
 def _get_pytesseract():
     global _PYTESSERACT
@@ -60,73 +110,9 @@ def read_temperature_from_frame(roi_bgr) -> tuple[int | None, float]:
 
     pytesseract = _get_pytesseract()
 
-    # Preprocess the image for better OCR results
-    # Convert to grayscale
-    # Apply Gaussian blur to reduce noise
-    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-
-    # Adaptive threshold works better under changing lighting
-    th = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 31, 7
-    )
-
-    # Try a small set of variants to make OCR robust against display/background polarity.
-    variants = [
-        th,
-        cv2.bitwise_not(th),
-        cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
-        cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1],
-    ]
+    variants = _prepare_ocr_variants(roi_bgr)
 
     # Find the best OCR result among variants
     best_value: int | None = None
     # Best confidence score found so far
-    best_conf = 0.0
-    # Tesseract OCR configuration
-    ocr_config = "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789"
-
-    for img in variants:
-        try:
-            # data is a dict with keys: level, page_num, block_num, par_num, line_num,
-            # word_num, left, top, width, height, conf, text
-            data = pytesseract.image_to_data(
-                img,
-                output_type=pytesseract.Output.DICT,
-                config=ocr_config,
-            )
-        except Exception:
-            continue
-
-        # Parse Tesseract results
-        # texts: list of recognized text strings
-        # confs: list of confidence scores as strings
-        texts = data.get("text", [])
-        confs = data.get("conf", [])
-        # Iterate over recognized texts and their confidence scores
-        # pick the best valid integer with highest confidence
-        for txt, conf_raw in zip(texts, confs):
-            token = "".join(ch for ch in str(txt) if ch.isdigit())
-            if not token:
-                continue
-
-            try:
-                conf = float(conf_raw)
-            except (TypeError, ValueError):
-                continue
-
-            if conf <= 0:
-                continue
-
-            # Tesseract confidence is usually 0..100.
-            conf01 = max(0.0, min(1.0, conf / 100.0))
-            value = int(token)
-
-            if conf01 > best_conf:
-                best_conf = conf01
-                best_value = value
-
-    if best_value is None:
-        return None, 0.0
-
-    return best_value, best_conf
+  
