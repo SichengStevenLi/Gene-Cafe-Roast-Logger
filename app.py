@@ -46,7 +46,7 @@ SAMPLE_INTERVAL_SEC = 5.0
 # Run OCR at a non-1s cadence so we don't phase-lock with a 1s display toggle.
 OCR_READ_INTERVAL_SEC = 0.7
 # Small preview tick for smoother camera updates without pegging CPU.
-PREVIEW_REFRESH_SEC = 0.05
+PREVIEW_REFRESH_SEC = 0.25
 PLOT_WINDOW_SEC = 15 * 60
 
 ORIGIN_OPTIONS = [
@@ -148,6 +148,8 @@ def init_state():
         st.session_state.events = []   # set temp change events
     if "set_temp" not in st.session_state:
         st.session_state.set_temp = None
+    if "set_temp_is_applied" not in st.session_state:
+        st.session_state.set_temp_is_applied = False
     if "current_set_temp_input" not in st.session_state:
         st.session_state.current_set_temp_input = 0
     if "classifier" not in st.session_state:
@@ -158,8 +160,14 @@ def init_state():
         st.session_state.roast_id = None
     if "reference_roast_id" not in st.session_state:
         st.session_state.reference_roast_id = None
+    if "_last_reference_prefill_roast_id" not in st.session_state:
+        st.session_state._last_reference_prefill_roast_id = None
     if "preview_camera" not in st.session_state:
         st.session_state.preview_camera = None
+    if "preview_live" not in st.session_state:
+        st.session_state.preview_live = False
+    if "preview_refresh_sec" not in st.session_state:
+        st.session_state.preview_refresh_sec = PREVIEW_REFRESH_SEC
     if "preview_cam_index" not in st.session_state:
         st.session_state.preview_cam_index = None
     if "preview_roi" not in st.session_state:
@@ -182,6 +190,12 @@ def init_state():
         st.session_state.suggested_roasts = []  # list[(roast_id, score)]
     if "suggested_roast_choice" not in st.session_state:
         st.session_state.suggested_roast_choice = None
+    if "reference_mode" not in st.session_state:
+        existing_source = st.session_state.get("reference_source")
+        if st.session_state.get("reference_roast_id") and existing_source in {"manual", "suggested", "same_bean"}:
+            st.session_state.reference_mode = existing_source
+        else:
+            st.session_state.reference_mode = "none"
     if "manual_ref_select" not in st.session_state:
         st.session_state.manual_ref_select = "(none)"
     if "_prev_manual_ref_select" not in st.session_state:
@@ -466,10 +480,11 @@ def main():
         st.session_state.is_decaf_input = bool(p.get("is_decaf", False))
         st.session_state.raw_weight_input = float(p.get("raw_weight_g", 0.0) or 0.0)
 
-        # Apply initial set temp from selected roast profile metadata.
+        # Loading a profile seeds the input, but the user must still explicitly apply it.
         profile_set_temp = int(p.get("preheat_temp", 0) or 0)
         st.session_state.current_set_temp_input = profile_set_temp
-        st.session_state.set_temp = profile_set_temp if profile_set_temp > 0 else None
+        st.session_state.set_temp = None
+        st.session_state.set_temp_is_applied = False
         st.rerun()
 
     bean_title = st.sidebar.text_input("Coffee name", value=st.session_state.get("bean_title_input", ""), key="bean_title_input")
@@ -639,6 +654,13 @@ def main():
             roi=(int(roi_x), int(roi_y), int(roi_w), int(roi_h)),
         )
 
+    set_temp_ready = (
+        bool(st.session_state.get("set_temp_is_applied", False))
+        and isinstance(st.session_state.set_temp, int)
+        and st.session_state.set_temp > 0
+        and int(st.session_state.current_set_temp_input) == int(st.session_state.set_temp)
+    )
+
     requirement_checks = [
         ("Coffee name", bool(bean_title.strip()), "Coffee name is required"),
         ("Origin", bool(origin.strip()) and origin != "(select)", "Origin is required"),
@@ -649,8 +671,8 @@ def main():
         ("Raw weight", float(raw_weight) > 0, "Raw weight must be greater than 0"),
         (
             "Current set temp",
-            isinstance(st.session_state.set_temp, int) and st.session_state.set_temp > 0,
-            "Set and apply current set temp before starting",
+            set_temp_ready,
+            "Click Apply set temp(F) before starting",
         ),
         ("Camera", camera_ok, camera_msg),
         ("OCR", ocr_ready, "OCR must be configured before start"),
@@ -743,125 +765,136 @@ def main():
             variety=variety_value if variety_value != "(select)" else "",
         )
 
-    roast_choices = ["(none)"] + roasts
+    bean_title_clean = bean_title.strip()
+    same_bean_versions = list_roasts_for_bean(bean_title_clean) if bean_title_clean else []
+    same_bean_ids = [rid for rid, _ in same_bean_versions]
 
-    # --- Section 1: Manual reference roast selector ---
-    # Uses its own state key so it never jumps when other sections update reference_roast_id.
-    ref_choice = st.sidebar.selectbox(
-        "Select reference roast",
-        roast_choices,
-        key="manual_ref_select",
-        format_func=lambda rid: "(none)" if rid == "(none)" else _roast_label(rid),
+    suggested_pairs = [
+        (rid, score)
+        for rid, score in _all_curve_scores.items()
+        if score is not None and rid not in same_bean_ids
+    ]
+    suggested_pairs.sort(key=lambda item: item[1], reverse=True)
+    suggested_pairs = suggested_pairs[:5]
+    suggestion_scores = {rid: score for rid, score in suggested_pairs}
+    suggestion_options = [rid for rid, _ in suggested_pairs]
+    st.session_state.suggested_roasts = suggested_pairs
+
+    mode_labels = {
+        "none": "No reference",
+        "same_bean": "Use same-bean roast",
+        "suggested": "Use suggested match",
+        "manual": "Browse all saved roasts",
+    }
+    mode_options = ["none", "same_bean", "suggested", "manual"]
+
+    if st.session_state.reference_mode not in mode_options:
+        st.session_state.reference_mode = "none"
+
+    selected_mode = st.sidebar.radio(
+        "Reference mode",
+        options=mode_options,
+        index=mode_options.index(st.session_state.reference_mode),
+        format_func=lambda mode: mode_labels[mode],
+        key="reference_mode",
+        help="Choose one source for the active reference curve, or disable reference entirely.",
     )
 
-    if ref_choice == "(none)":
-        st.sidebar.caption("Match score: --")
-    else:
-        _ref_score = _all_curve_scores.get(ref_choice)
-        if _ref_score is not None:
-            st.sidebar.caption(f"Match score: **{_ref_score:.1f}%**")
-        else:
-            st.sidebar.caption("Match score: N/A (decaf mismatch)")
-        _ref_stages = _stage_caption(ref_choice)
-        if _ref_stages:
-            st.sidebar.caption(f"Stages: {_ref_stages}")
+    active_reference_id = st.session_state.reference_roast_id
+    pending_reference_id: str | None = None
+    pending_reference_source: str | None = None
 
-    # Detect if the user just changed this widget and take ownership.
-    if st.session_state.manual_ref_select != st.session_state._prev_manual_ref_select:
-        st.session_state._prev_manual_ref_select = st.session_state.manual_ref_select
-        st.session_state.reference_source = "manual"
+    if selected_mode == "none":
+        st.session_state.reference_source = None
+        st.session_state.reference_roast_id = None
+        active_reference_id = None
+        st.sidebar.caption("Active reference: None")
 
-    if st.session_state.reference_source == "manual":
-        if ref_choice != "(none)":
-            st.session_state.reference_roast_id = ref_choice
-        else:
-            st.session_state.reference_roast_id = None
-
-    # --- Section 2: Same-bean version quick-picker ---
-    # Independent selector — only sets reference on explicit button click.
-    bean_title_clean = bean_title.strip()
-    if bean_title_clean:
-        same_bean_versions = list_roasts_for_bean(bean_title_clean)
-        if same_bean_versions:
-            same_bean_ids = [rid for rid, _ in same_bean_versions]
-
-            st.sidebar.info(
-                f"Detected the same bean in your history: {bean_title_clean}. "
-                "Do you want to use one of its previous roast versions as reference?"
-            )
-
+    elif selected_mode == "same_bean":
+        if same_bean_ids:
+            if st.session_state.get("same_bean_versions_select") not in same_bean_ids:
+                st.session_state.same_bean_versions_select = same_bean_ids[0]
             selected_same_bean_version = st.sidebar.selectbox(
-                "Same-bean roast versions (newest to oldest)",
+                "Same-bean roast version",
                 same_bean_ids,
                 format_func=lambda rid: _roast_label(rid),
                 key="same_bean_versions_select",
+                help="Previous batches of this same coffee, newest first.",
             )
-
-            _same_score = _all_curve_scores.get(selected_same_bean_version)
-            if _same_score is not None:
-                st.sidebar.caption(f"Match score: **{_same_score:.1f}%**")
-            else:
-                st.sidebar.caption("Match score: N/A (decaf mismatch)")
-            _same_stages = _stage_caption(selected_same_bean_version)
-            if _same_stages:
-                st.sidebar.caption(f"Stages: {_same_stages}")
-
-            if st.sidebar.button("Use selected same-bean version", key="use_same_bean_reference"):
-                st.session_state.reference_source = "same_bean"
-                st.session_state.reference_roast_id = selected_same_bean_version
-                st.session_state.suggested_roast_choice = selected_same_bean_version
-                st.rerun()
-
-    # --- Section 3: Suggested compatible curves ---
-    # Only drives reference_roast_id when this section is the active source.
-    if st.sidebar.button("Suggest similar roasts"):
-        suggestions = recommend_roasts(
-            origin=origin,
-            altitude=int(altitude),
-            process=process,
-            appearance=appearance,
-            raw_weight_g=float(raw_weight),
-            is_decaf=bool(is_decaf),
-            bean_category=bean_type_value if bean_type_value != "(select)" else "",
-            variety=variety_value if variety_value != "(select)" else "",
-            limit=5,
-        )
-        if suggestions:
-            st.session_state.suggested_roasts = suggestions
-            st.session_state.reference_source = "suggested"
-            current_options = [rid for rid, _ in suggestions]
-            if st.session_state.suggested_roast_choice not in current_options:
-                st.session_state.suggested_roast_choice = current_options[0]
-            st.session_state.reference_roast_id = st.session_state.suggested_roast_choice
+            pending_reference_id = selected_same_bean_version
+            pending_reference_source = "same_bean"
         else:
-            st.session_state.suggested_roasts = []
-            st.session_state.suggested_roast_choice = None
-            st.sidebar.info("No saved roasts yet to compare.")
+            st.sidebar.info("No saved roast versions found for this coffee yet.")
 
-    if st.session_state.suggested_roasts:
-        st.sidebar.caption("Suggested compatible curves")
-        suggestion_scores = {rid: score for rid, score in st.session_state.suggested_roasts}
-        suggestion_options = [rid for rid, _ in st.session_state.suggested_roasts]
+    elif selected_mode == "suggested":
+        if suggestion_options:
+            if st.session_state.suggested_roast_choice not in suggestion_options:
+                st.session_state.suggested_roast_choice = suggestion_options[0]
+            selected_suggestion = st.sidebar.selectbox(
+                "Suggested reference",
+                suggestion_options,
+                index=suggestion_options.index(st.session_state.suggested_roast_choice),
+                format_func=lambda rid: _roast_label(rid),
+                help="Top compatibility matches from your roast history.",
+            )
+            st.session_state.suggested_roast_choice = selected_suggestion
+            pending_reference_id = selected_suggestion
+            pending_reference_source = "suggested"
+        else:
+            st.sidebar.info("No compatible saved roasts available yet.")
 
-        if st.session_state.suggested_roast_choice not in suggestion_options:
-            st.session_state.suggested_roast_choice = suggestion_options[0]
-
-        selected_suggestion = st.sidebar.radio(
-            "Suggested options",
-            options=suggestion_options,
-            index=suggestion_options.index(st.session_state.suggested_roast_choice),
-            format_func=lambda rid: _roast_label(rid),
+    else:
+        manual_options = ["(none)"] + roasts
+        if st.session_state.manual_ref_select not in manual_options:
+            st.session_state.manual_ref_select = "(none)"
+        selected_manual = st.sidebar.selectbox(
+            "Select reference roast",
+            manual_options,
+            format_func=lambda rid: "(none)" if rid == "(none)" else _roast_label(rid),
+            key="manual_ref_select",
+            help="Browse all roast logs manually.",
         )
-        # Only update the active reference when this section owns it.
-        if selected_suggestion != st.session_state.suggested_roast_choice:
-            st.session_state.reference_source = "suggested"
-        st.session_state.suggested_roast_choice = selected_suggestion
-        if st.session_state.reference_source == "suggested":
-            st.session_state.reference_roast_id = selected_suggestion
-        st.sidebar.caption(f"Match score: **{suggestion_scores[selected_suggestion]:.1f}%**")
-        _sug_stages = _stage_caption(selected_suggestion)
-        if _sug_stages:
-            st.sidebar.caption(f"Stages: {_sug_stages}")
+        pending_reference_id = None if selected_manual == "(none)" else selected_manual
+        pending_reference_source = "manual"
+
+    if selected_mode != "none" and pending_reference_source is not None:
+        apply_reference = st.sidebar.button("Use selected reference", key="apply_selected_reference")
+        if apply_reference:
+            if pending_reference_id is None:
+                st.session_state.reference_source = None
+                st.session_state.reference_roast_id = None
+                active_reference_id = None
+            else:
+                st.session_state.reference_source = pending_reference_source
+                st.session_state.reference_roast_id = pending_reference_id
+                active_reference_id = pending_reference_id
+            st.rerun()
+
+    if active_reference_id is None:
+        st.sidebar.caption("Active reference: None")
+
+    if active_reference_id:
+        # st.sidebar.caption(f"Active reference: {_roast_label(active_reference_id)}")
+        _active_score = _all_curve_scores.get(active_reference_id)
+        if _active_score is not None:
+            st.sidebar.caption(f"Match score: **{_active_score:.1f}%**")
+        else:
+            st.sidebar.caption("Match score: N/A (decaf mismatch)")
+
+    # When the user chooses a different reference before starting, prefill the set-temp input
+    # with that roast's initial starting temperature. The user still needs to click Apply.
+    if not st.session_state.roast_active:
+        last_prefill_ref = st.session_state.get("_last_reference_prefill_roast_id")
+        current_prefill_ref = active_reference_id
+        if current_prefill_ref != last_prefill_ref:
+            st.session_state._last_reference_prefill_roast_id = current_prefill_ref
+            if current_prefill_ref:
+                ref_meta = roast_meta_cache.get(current_prefill_ref, {})
+                ref_start_temp = int(ref_meta.get("preheat_temp", 0) or 0)
+                if ref_start_temp > 0:
+                    st.session_state.current_set_temp_input = ref_start_temp
+                    st.session_state.set_temp_is_applied = False
+                    st.rerun()
 
 
     start_btn = st.sidebar.button(
@@ -880,6 +913,8 @@ def main():
         key="current_set_temp_input",
     )
     new_set_temp = int(set_temp_input)
+    if int(st.session_state.set_temp or 0) != new_set_temp:
+        st.session_state.set_temp_is_applied = False
     apply_set = st.sidebar.button("Apply set temp(F)")
 
     if st.session_state.get("_clear_roast_notes_on_rerun", False):
@@ -919,6 +954,7 @@ def main():
         st.session_state.samples = []
         st.session_state.events = []
         st.session_state.set_temp = None
+        st.session_state.set_temp_is_applied = False
         st.session_state.classifier = TempClassifier()
         if st.session_state.camera:
             try:
@@ -947,6 +983,7 @@ def main():
     if apply_set:
         prev_set_temp = st.session_state.set_temp
         st.session_state.set_temp = new_set_temp
+        st.session_state.set_temp_is_applied = new_set_temp > 0
         # Event marker
         if st.session_state.roast_active and st.session_state.start_epoch is not None:
             st.session_state.events.append(
@@ -980,7 +1017,8 @@ def main():
         st.session_state.samples = []
         st.session_state.events = []
         st.session_state.classifier = TempClassifier()
-        st.session_state.set_temp = new_set_temp  # initial set temp at start
+        st.session_state.set_temp = int(st.session_state.set_temp)
+        st.session_state.set_temp_is_applied = True
         st.session_state.disabled_point_ids = []
         st.session_state.final_roasted_weight = 0.0
         st.session_state.final_total_roast_time = ""
@@ -1303,7 +1341,16 @@ def main():
         st.subheader("Camera / Debug")
         if st.session_state.camera is None:
             st.info("Pre-roast preview mode: adjust ROI in sidebar while viewing live camera feed.")
-            live_preview = st.checkbox("Live preview", value=True, key="preview_live")
+            live_preview = st.checkbox("Live preview", value=bool(st.session_state.get("preview_live", False)), key="preview_live")
+            preview_refresh = st.slider(
+                "Preview refresh (sec)",
+                min_value=0.03,
+                max_value=0.50,
+                value=float(st.session_state.get("preview_refresh_sec", PREVIEW_REFRESH_SEC)),
+                step=0.01,
+                key="preview_refresh_sec",
+                help="Lower = faster feed and higher CPU usage.",
+            )
             requested_index = int(cam_index)
             requested_roi = (int(roi_x), int(roi_y), int(roi_w), int(roi_h))
 
@@ -1345,7 +1392,7 @@ def main():
                 st.image(roi, channels="BGR", caption="ROI preview (what OCR reads)", width=300)
 
             if live_preview:
-                time.sleep(PREVIEW_REFRESH_SEC)
+                time.sleep(float(preview_refresh))
                 st.rerun()
         else:
             if st.session_state.preview_camera:
