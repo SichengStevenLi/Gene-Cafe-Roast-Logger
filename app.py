@@ -120,6 +120,7 @@ PROCESS_OPTIONS = [
     "Anaerobic Washed",
     "Anaerobic Natural",
     "Carbonic Maceration",
+    "Thermal Shock",
     "Semi-Washed",
     "Cofermentation",
     "Experimental",
@@ -404,7 +405,28 @@ def main():
     init_state()
 
     # Streamlit page setup
-    st.set_page_config(page_title=APP_TITLE, layout="wide")
+    st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
+    st.markdown(
+        """
+        <style>
+        #MainMenu,
+        footer {
+            visibility: hidden;
+        }
+        .stApp .main .block-container,
+        [data-testid="stAppViewContainer"] .main .block-container {
+            padding-top: 0rem !important;
+            margin-top: 0rem !important;
+        }
+        .stApp h1,
+        [data-testid="stAppViewContainer"] h1 {
+            margin-top: 0rem !important;
+            padding-top: 0rem !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     st.title(APP_TITLE)
 
     ocr_ready, ocr_message = get_ocr_status()
@@ -1177,7 +1199,7 @@ def main():
             st.sidebar.warning(f"Could not load latest roast meta for weight update: {e}")
 
     # ---- Main layout ----
-    left, right = st.columns([3.2, 1.0])
+    left, right = st.columns([4.0, 0.8])
 
     #-- Live plot on the left, camera feed and debug info on the right --
     with left:
