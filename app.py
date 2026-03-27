@@ -1,22 +1,19 @@
 """
-    Main Streamlit app for Gene Café Roast Logger MVP.
-    Center of the app: UI, state management, and orchestration of components.
-    Uses:
-    - camera.py: Camera access and ROI cropping
-    - ocr.py: OCR reading of temperature digits from ROI
-    - classifier.py: Classifier logic to determine CURRENT_VIEW vs SET_VIEW
-    - plotter.py: Plotting roast curves
-    - storage.py: Saving/loading roast sessions and metadata
-    - recommend.py: Simple roast recommendation based on metadata
+Main Streamlit app for Gene Café Roast Logger MVP.
+Center of the app: UI, state management, and orchestration of components.
+Uses:
+- camera.py: Camera access and ROI cropping
+- ocr.py: OCR reading of temperature digits from ROI
+- classifier.py: Classifier logic to determine CURRENT_VIEW vs SET_VIEW
+- plotter.py: Plotting roast curves
+- storage.py: Saving/loading roast sessions and metadata
+- recommend.py: Simple roast recommendation based on metadata
 """
 
 import time
-from dataclasses import asdict
-import re
 import cv2
 import streamlit as st
 import pandas as pd
-
 
 from camera import Camera
 from ocr import read_temperature_from_frame, get_ocr_status
@@ -37,16 +34,14 @@ from storage import (
     next_batch_number,
     make_roast_log_name,
 )
-from recommend import recommend_roasts, score_from_meta_cache
+from recommend import score_from_meta_cache
 
 
 APP_TITLE = "Gene Café Roast Logger"
-# customizable sampling interval (seconds)
 SAMPLE_INTERVAL_SEC = 5.0
-# Run OCR at a non-1s cadence so we don't phase-lock with a 1s display toggle.
-OCR_READ_INTERVAL_SEC = 0.7
-# Small preview tick for smoother camera updates without pegging CPU.
+OCR_READ_INTERVAL_SEC = 0.50
 PREVIEW_REFRESH_SEC = 0.08
+UI_RERUN_SEC = 0.10
 PLOT_WINDOW_SEC = 15 * 60
 CAMERA_SCAN_MAX_INDEX = 4
 
@@ -70,7 +65,6 @@ ORIGIN_OPTIONS = [
     "Vietnam",
     "India",
     "Peru",
-
     "Other",
 ]
 
@@ -128,54 +122,64 @@ PROCESS_OPTIONS = [
     "Other",
 ]
 
-# Note: for simplicity, all state is in session_state. 
-# In a more complex app, we might want to split into multiple pages or use a more robust state management approach.
+
 def init_state():
-    # Initialize all session state variables with defaults if they don't exist yet.
-    # running state starts when roast starts, not on app load, so default is False
     if "running" not in st.session_state:
         st.session_state.running = False
     if "start_epoch" not in st.session_state:
         st.session_state.start_epoch = None
     if "last_sample_epoch" not in st.session_state:
         st.session_state.last_sample_epoch = 0.0
+    if "next_sample_due_epoch" not in st.session_state:
+        st.session_state.next_sample_due_epoch = None
     if "last_ocr_epoch" not in st.session_state:
         st.session_state.last_ocr_epoch = 0.0
     if "last_capture_epoch" not in st.session_state:
         st.session_state.last_capture_epoch = 0.0
+    if "last_ui_rerun_epoch" not in st.session_state:
+        st.session_state.last_ui_rerun_epoch = 0.0
+
     if "live_frame" not in st.session_state:
         st.session_state.live_frame = None
     if "live_roi" not in st.session_state:
         st.session_state.live_roi = None
     if "capture_buffer" not in st.session_state:
         st.session_state.capture_buffer = []
+
     if "last_ocr_frame" not in st.session_state:
         st.session_state.last_ocr_frame = None
     if "last_ocr_roi" not in st.session_state:
         st.session_state.last_ocr_roi = None
-    if "pending_ocr" not in st.session_state:
-        # Holds the most recent confirmed CURRENT_VIEW read within the current 5s window
-        st.session_state.pending_ocr = None  # dict with keys raw_read, result
+
+    if "current_window_reads" not in st.session_state:
+        st.session_state.current_window_reads = []
+    if "last_confirmed_current" not in st.session_state:
+        st.session_state.last_confirmed_current = None
+
     if "samples" not in st.session_state:
-        st.session_state.samples = []  # list of dict rows
+        st.session_state.samples = []
     if "events" not in st.session_state:
-        st.session_state.events = []   # set temp change events
+        st.session_state.events = []
+
     if "set_temp" not in st.session_state:
         st.session_state.set_temp = None
     if "set_temp_is_applied" not in st.session_state:
         st.session_state.set_temp_is_applied = False
     if "current_set_temp_input" not in st.session_state:
         st.session_state.current_set_temp_input = 0
+
     if "classifier" not in st.session_state:
         st.session_state.classifier = TempClassifier()
     if "camera" not in st.session_state:
         st.session_state.camera = None
     if "roast_id" not in st.session_state:
         st.session_state.roast_id = None
+
     if "reference_roast_id" not in st.session_state:
         st.session_state.reference_roast_id = None
     if "_last_reference_prefill_roast_id" not in st.session_state:
         st.session_state._last_reference_prefill_roast_id = None
+
     if "preview_camera" not in st.session_state:
         st.session_state.preview_camera = None
     if "preview_live" not in st.session_state:
@@ -190,8 +194,10 @@ def init_state():
         st.session_state.preview_cam_index = None
     if "preview_roi" not in st.session_state:
         st.session_state.preview_roi = None
+
     if "disabled_point_ids" not in st.session_state:
         st.session_state.disabled_point_ids = []
+
     if "roast_active" not in st.session_state:
         st.session_state.roast_active = False
     if "end_confirm_pending" not in st.session_state:
@@ -204,10 +210,12 @@ def init_state():
         st.session_state.end_confirm_prev_running = False
     if "last_saved_roast_id" not in st.session_state:
         st.session_state.last_saved_roast_id = None
+
     if "suggested_roasts" not in st.session_state:
-        st.session_state.suggested_roasts = []  # list[(roast_id, score)]
+        st.session_state.suggested_roasts = []
     if "suggested_roast_choice" not in st.session_state:
         st.session_state.suggested_roast_choice = None
+
     if "reference_mode" not in st.session_state:
         existing_source = st.session_state.get("reference_source")
         if st.session_state.get("reference_roast_id") and existing_source in {"manual", "suggested", "same_bean"}:
@@ -219,8 +227,8 @@ def init_state():
     if "_prev_manual_ref_select" not in st.session_state:
         st.session_state._prev_manual_ref_select = "(none)"
     if "reference_source" not in st.session_state:
-        # Tracks which section last set the reference roast: "manual" | "suggested" | "same_bean"
         st.session_state.reference_source = None
+
     if "bean_title_input" not in st.session_state:
         st.session_state.bean_title_input = ""
     if "origin_choice_input" not in st.session_state:
@@ -253,6 +261,7 @@ def init_state():
         st.session_state.roast_notes_input = ""
     if "_clear_roast_notes_on_rerun" not in st.session_state:
         st.session_state._clear_roast_notes_on_rerun = False
+
     if "cam_index_input" not in st.session_state:
         _cam_cfg = load_camera_config()
         st.session_state.cam_index_input = int(_cam_cfg["cam_index"])
@@ -260,6 +269,7 @@ def init_state():
         st.session_state.roi_y_input = int(_cam_cfg["roi_y"])
         st.session_state.roi_w_input = int(_cam_cfg["roi_w"])
         st.session_state.roi_h_input = int(_cam_cfg["roi_h"])
+
     if "camera_ready_cache_key" not in st.session_state:
         st.session_state.camera_ready_cache_key = None
     if "camera_ready_cache_ts" not in st.session_state:
@@ -268,6 +278,7 @@ def init_state():
         st.session_state.camera_ready_cache_ok = False
     if "camera_ready_cache_msg" not in st.session_state:
         st.session_state.camera_ready_cache_msg = "Camera check pending"
+
     if "detected_cameras" not in st.session_state:
         st.session_state.detected_cameras = []
     if "camera_scan_done" not in st.session_state:
@@ -275,22 +286,22 @@ def init_state():
     if "camera_select_input" not in st.session_state:
         st.session_state.camera_select_input = int(st.session_state.cam_index_input)
 
-# Get elapsed seconds since roast start, or 0 if not started
+
 def current_elapsed_sec() -> float:
     if st.session_state.start_epoch is None:
         return 0.0
     return time.time() - st.session_state.start_epoch
 
-# Add a new sample to session state with classifier result
+
 def add_sample(elapsed_sec: float, raw_read: int | None, result: ClassifierResult):
     st.session_state.samples.append(
         {
-            "t_sec": round(elapsed_sec, 3), # keep 3 decimals for better x-axis plotting
-            "raw_read": raw_read, # for debugging; not necessarily the same as temp_current
-            "view_mode": result.view_mode, # "CURRENT_VIEW" | "SET_VIEW" | "UNKNOWN"
-            "temp_current": result.current_temp, # this is what we plot as the "current temp" curve (can be None if uncertain)
-            "set_temp": result.set_temp, # for reference; should match the latest set temp input
-            "confidence": result.confidence, # for debugging; not currently used in logic, but could be used to filter out low-confidence OCR reads in the future
+            "t_sec": round(elapsed_sec, 3),
+            "raw_read": raw_read,
+            "view_mode": result.view_mode,
+            "temp_current": result.current_temp,
+            "set_temp": result.set_temp,
+            "confidence": result.confidence,
         }
     )
 
@@ -305,7 +316,6 @@ def _camera_ready(index: int, roi: tuple[int, int, int, int]) -> tuple[bool, str
 
 
 def _probe_camera_index(idx: int, warmup_reads: int = 8, open_attempts: int = 2) -> bool:
-    # On macOS, some USB cameras only respond on specific backends or after a longer warmup.
     backends = [cv2.CAP_ANY]
     avf = getattr(cv2, "CAP_AVFOUNDATION", None)
     if avf is not None:
@@ -324,7 +334,6 @@ def _probe_camera_index(idx: int, warmup_reads: int = 8, open_attempts: int = 2)
             except Exception:
                 pass
 
-            # Give USB devices a moment to settle after opening.
             time.sleep(0.10)
 
             ok = False
@@ -375,15 +384,6 @@ def _camera_ready_cached(index: int, roi: tuple[int, int, int, int], ttl_sec: fl
     return ok, msg
 
 
-def _valid_mmss(s: str) -> bool:
-    if not s:
-        return False
-    if not re.fullmatch(r"\d{1,2}:\d{2}", s.strip()):
-        return False
-    m_str, s_str = s.strip().split(":")
-    return 0 <= int(s_str) < 60 and int(m_str) >= 0
-
-
 def _format_mmss(seconds: float) -> str:
     total = max(0, int(round(seconds)))
     minutes, secs = divmod(total, 60)
@@ -432,12 +432,87 @@ def _compute_phase_stats(events: list[dict], elapsed_sec: float) -> dict[str, tu
     }
 
 
+def _throttled_rerun(min_interval_sec: float):
+    now = time.time()
+    last = float(st.session_state.get("last_ui_rerun_epoch", 0.0))
+    wait = max(0.0, float(min_interval_sec) - (now - last))
+    if wait > 0:
+        time.sleep(wait)
+    st.session_state.last_ui_rerun_epoch = time.time()
+    st.rerun()
+
+
+def _resolve_window_vote(window_reads: list[dict], window_end_t_sec: float, cluster_tol: int = 2) -> dict | None:
+    if not window_reads:
+        return None
+
+    valid_reads = []
+    for r in window_reads:
+        temp = r.get("temp")
+        conf = float(r.get("conf", 0.0))
+        t_sec = float(r.get("t_sec", 0.0))
+        raw_read = r.get("raw_read")
+        if temp is None or raw_read is None or conf <= 0:
+            continue
+        valid_reads.append(
+            {
+                "temp": int(temp),
+                "raw_read": int(raw_read),
+                "conf": conf,
+                "t_sec": t_sec,
+            }
+        )
+
+    if not valid_reads:
+        return None
+
+    centers = sorted({r["temp"] for r in valid_reads})
+    best_cluster: list[dict] = []
+    best_score = -1.0
+
+    for center in centers:
+        cluster = [r for r in valid_reads if abs(r["temp"] - center) <= cluster_tol]
+        if not cluster:
+            continue
+
+        score = 0.0
+        for r in cluster:
+            age = max(0.0, window_end_t_sec - r["t_sec"])
+            recency_weight = 1.0 + 0.25 * max(0.0, 1.0 - min(1.0, age / SAMPLE_INTERVAL_SEC))
+            score += r["conf"] * recency_weight
+
+        if score > best_score:
+            best_score = score
+            best_cluster = cluster
+
+    if not best_cluster:
+        return None
+
+    weighted_sum = 0.0
+    total_weight = 0.0
+
+    for r in best_cluster:
+        age = max(0.0, window_end_t_sec - r["t_sec"])
+        recency_weight = 1.0 + 0.25 * max(0.0, 1.0 - min(1.0, age / SAMPLE_INTERVAL_SEC))
+        weight = max(0.05, r["conf"]) * recency_weight
+        weighted_sum += r["temp"] * weight
+        total_weight += weight
+
+    voted_temp = int(round(weighted_sum / total_weight)) if total_weight > 0 else int(best_cluster[-1]["temp"])
+    voted_conf = min(1.0, sum(r["conf"] for r in best_cluster) / max(1, len(best_cluster)))
+
+    return {
+        "temp": voted_temp,
+        "raw_read": voted_temp,
+        "conf": voted_conf,
+        "cluster_size": len(best_cluster),
+    }
+
+
 def main():
-    # Initialize state and ensure data directories exist
     ensure_data_dirs()
     init_state()
 
-    # Streamlit page setup
     st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
     st.markdown(
         """
@@ -466,12 +541,8 @@ def main():
     if not ocr_ready:
         st.warning(f"{ocr_message} Temperature reads will be unavailable until OCR is configured.")
 
-    # ---- Sidebar: Metadata + Controls ----
     st.sidebar.header("Roast Setup")
 
-    # Bean metadata inputs (before roast)
-    # De-duplicate by bean title: show only the most recent roast per unique bean name.
-    # list_roasts() returns newest-first so the first seen per title is the latest batch.
     _all_profile_ids = list_roasts()
     roast_profile_meta: dict[str, dict] = {}
     roast_profile_labels: dict[str, str] = {}
@@ -529,13 +600,17 @@ def main():
         _set_choice_and_custom(str(p.get("origin", "") or ""), ORIGIN_OPTIONS, "origin_choice_input", "origin_custom_input")
         _set_choice_and_custom(str(p.get("bean_category", "") or ""), TYPE_OPTIONS, "type_choice_input", "type_custom_input")
         _set_choice_and_custom(str(p.get("variety", "") or ""), VARIETY_OPTIONS, "variety_choice_input", "variety_custom_input")
-        _set_choice_and_custom(str(p.get("bean_appearance", "") or ""), BEAN_APPEARANCE_OPTIONS, "appearance_choice_input", "appearance_custom_input")
+        _set_choice_and_custom(
+            str(p.get("bean_appearance", "") or ""),
+            BEAN_APPEARANCE_OPTIONS,
+            "appearance_choice_input",
+            "appearance_custom_input",
+        )
         _set_choice_and_custom(str(p.get("process", "") or ""), PROCESS_OPTIONS, "process_choice_input", "process_custom_input")
         st.session_state.altitude_input = int(p.get("altitude_m", 0) or 0)
         st.session_state.is_decaf_input = bool(p.get("is_decaf", False))
         st.session_state.raw_weight_input = float(p.get("raw_weight_g", 0.0) or 0.0)
 
-        # Loading a profile seeds the input, but the user must still explicitly apply it.
         profile_set_temp = int(p.get("preheat_temp", 0) or 0)
         st.session_state.current_set_temp_input = profile_set_temp
         st.session_state.set_temp = None
@@ -547,7 +622,9 @@ def main():
     origin_choice = st.sidebar.selectbox(
         "Origin",
         ORIGIN_OPTIONS,
-        index=ORIGIN_OPTIONS.index(st.session_state.get("origin_choice_input", "(select)")) if st.session_state.get("origin_choice_input", "(select)") in ORIGIN_OPTIONS else 0,
+        index=ORIGIN_OPTIONS.index(st.session_state.get("origin_choice_input", "(select)"))
+        if st.session_state.get("origin_choice_input", "(select)") in ORIGIN_OPTIONS
+        else 0,
         key="origin_choice_input",
     )
     origin = origin_choice
@@ -557,7 +634,9 @@ def main():
     type_choice = st.sidebar.selectbox(
         "Type",
         TYPE_OPTIONS,
-        index=TYPE_OPTIONS.index(st.session_state.get("type_choice_input", "(select)")) if st.session_state.get("type_choice_input", "(select)") in TYPE_OPTIONS else 0,
+        index=TYPE_OPTIONS.index(st.session_state.get("type_choice_input", "(select)"))
+        if st.session_state.get("type_choice_input", "(select)") in TYPE_OPTIONS
+        else 0,
         key="type_choice_input",
     )
     bean_type_value = type_choice
@@ -567,24 +646,31 @@ def main():
     variety_choice = st.sidebar.selectbox(
         "Variety",
         VARIETY_OPTIONS,
-        index=VARIETY_OPTIONS.index(st.session_state.get("variety_choice_input", "(select)")) if st.session_state.get("variety_choice_input", "(select)") in VARIETY_OPTIONS else 0,
+        index=VARIETY_OPTIONS.index(st.session_state.get("variety_choice_input", "(select)"))
+        if st.session_state.get("variety_choice_input", "(select)") in VARIETY_OPTIONS
+        else 0,
         key="variety_choice_input",
     )
     variety_value = variety_choice
     if variety_choice == "Other":
-        variety_value = st.sidebar.text_input("Variety (custom)", value=st.session_state.get("variety_custom_input", ""), key="variety_custom_input")
+        variety_value = st.sidebar.text_input(
+            "Variety (custom)", value=st.session_state.get("variety_custom_input", ""), key="variety_custom_input"
+        )
 
     size_choice = st.sidebar.selectbox(
         "Appearance",
         BEAN_APPEARANCE_OPTIONS,
-        index=BEAN_APPEARANCE_OPTIONS.index(st.session_state.get("appearance_choice_input", "(select)")) if st.session_state.get("appearance_choice_input", "(select)") in BEAN_APPEARANCE_OPTIONS else 0,
+        index=BEAN_APPEARANCE_OPTIONS.index(st.session_state.get("appearance_choice_input", "(select)"))
+        if st.session_state.get("appearance_choice_input", "(select)") in BEAN_APPEARANCE_OPTIONS
+        else 0,
         key="appearance_choice_input",
     )
     appearance = size_choice
     if size_choice == "Other":
-        appearance = st.sidebar.text_input("Appearance (custom)", value=st.session_state.get("appearance_custom_input", ""), key="appearance_custom_input")
+        appearance = st.sidebar.text_input(
+            "Appearance (custom)", value=st.session_state.get("appearance_custom_input", ""), key="appearance_custom_input"
+        )
 
-    # Keep compatibility with existing storage/recommendation schema.
     bean_type = ""
     if bean_type_value.strip() and variety_value.strip() and bean_type_value != "(select)" and variety_value != "(select)":
         bean_type = f"{bean_type_value} / {variety_value}"
@@ -604,12 +690,16 @@ def main():
     process_choice = st.sidebar.selectbox(
         "Processing method",
         PROCESS_OPTIONS,
-        index=PROCESS_OPTIONS.index(st.session_state.get("process_choice_input", "(select)")) if st.session_state.get("process_choice_input", "(select)") in PROCESS_OPTIONS else 0,
+        index=PROCESS_OPTIONS.index(st.session_state.get("process_choice_input", "(select)"))
+        if st.session_state.get("process_choice_input", "(select)") in PROCESS_OPTIONS
+        else 0,
         key="process_choice_input",
     )
     process = process_choice
     if process_choice == "Other":
-        process = st.sidebar.text_input("Processing method (custom)", value=st.session_state.get("process_custom_input", ""), key="process_custom_input")
+        process = st.sidebar.text_input(
+            "Processing method (custom)", value=st.session_state.get("process_custom_input", ""), key="process_custom_input"
+        )
 
     is_decaf = st.sidebar.checkbox("Decaf", value=bool(st.session_state.get("is_decaf_input", False)), key="is_decaf_input")
 
@@ -642,7 +732,6 @@ def main():
 
     st.sidebar.divider()
 
-    # Camera detection and selection
     if not st.session_state.camera_scan_done:
         st.session_state.detected_cameras = _detect_camera_indices(max_index=CAMERA_SCAN_MAX_INDEX)
         st.session_state.camera_scan_done = True
@@ -684,7 +773,6 @@ def main():
         )
         st.session_state.camera_select_input = int(cam_index)
 
-    # ROI calibration
     st.sidebar.caption("ROI (pixels): x, y, w, h")
     roi_x = st.sidebar.number_input("ROI x", min_value=0, step=1, key="roi_x_input", disabled=st.session_state.roast_active)
     roi_y = st.sidebar.number_input("ROI y", min_value=0, step=1, key="roi_y_input", disabled=st.session_state.roast_active)
@@ -724,11 +812,7 @@ def main():
         ("Appearance", bool(appearance.strip()) and appearance != "(select)", "Appearance is required"),
         ("Processing method", bool(process.strip()) and process != "(select)", "Processing method is required"),
         ("Raw weight", float(raw_weight) > 0, "Raw weight must be greater than 0"),
-        (
-            "Current set temp",
-            set_temp_ready,
-            "Click Apply set temp(F) before starting",
-        ),
+        ("Current set temp", set_temp_ready, "Click Apply set temp(F) before starting"),
         ("Camera", camera_ok, camera_msg),
         ("OCR", ocr_ready, "OCR must be configured before start"),
     ]
@@ -757,9 +841,7 @@ def main():
     st.sidebar.divider()
     st.sidebar.header("Reference curve (optional)")
 
-    # Recommend similar roasts based on metadata if available
     roasts = list_roasts()
-
     roast_meta_cache: dict[str, dict] = {}
     title_counts: dict[str, int] = {}
 
@@ -788,23 +870,6 @@ def main():
             return t
         return f"{t} #{batch_no}"
 
-    def _stage_caption(rid: str) -> str:
-        """Return a short stage-times string like 'Y: 3:45  M: 6:10  1C: 8:30' from cached meta events."""
-        m = roast_meta_cache.get(rid, {})
-        evts = m.get("events") or []
-        yellow_t = next((float(e["t_sec"]) for e in evts if e.get("type") == "yellowing_start"), None)
-        browning_t = next((float(e["t_sec"]) for e in evts if e.get("type") == "browning_start"), None)
-        crack_t = next((float(e["t_sec"]) for e in evts if e.get("type") == "first_crack"), None)
-        parts = []
-        if yellow_t is not None:
-            parts.append(f"Y: {_format_mmss(yellow_t)}")
-        if browning_t is not None:
-            parts.append(f"M: {_format_mmss(browning_t)}")
-        if crack_t is not None:
-            parts.append(f"1C: {_format_mmss(crack_t)}")
-        return "  ".join(parts) if parts else ""
-
-    # Precompute per-roast similarity so each selector can show a dynamic score text below it.
     _all_curve_scores: dict[str, float | None] = {}
     for rid in roasts:
         _all_curve_scores[rid] = score_from_meta_cache(
@@ -831,7 +896,6 @@ def main():
     ]
     suggested_pairs.sort(key=lambda item: item[1], reverse=True)
     suggested_pairs = suggested_pairs[:5]
-    suggestion_scores = {rid: score for rid, score in suggested_pairs}
     suggestion_options = [rid for rid, _ in suggested_pairs]
     st.session_state.suggested_roasts = suggested_pairs
 
@@ -929,15 +993,12 @@ def main():
         st.sidebar.caption("Active reference: None")
 
     if active_reference_id:
-        # st.sidebar.caption(f"Active reference: {_roast_label(active_reference_id)}")
         _active_score = _all_curve_scores.get(active_reference_id)
         if _active_score is not None:
             st.sidebar.caption(f"Match score: **{_active_score:.1f}%**")
         else:
             st.sidebar.caption("Match score: N/A (decaf mismatch)")
 
-    # When the user chooses a different reference before starting, prefill the set-temp input
-    # with that roast's initial starting temperature. The user still needs to click Apply.
     if not st.session_state.roast_active:
         last_prefill_ref = st.session_state.get("_last_reference_prefill_roast_id")
         current_prefill_ref = active_reference_id
@@ -950,7 +1011,6 @@ def main():
                     st.session_state.current_set_temp_input = ref_start_temp
                     st.session_state.set_temp_is_applied = False
                     st.rerun()
-
 
     start_btn = st.sidebar.button(
         "Start logging",
@@ -997,21 +1057,23 @@ def main():
     )
     reset_session = st.sidebar.button("Reset session", type="secondary")
 
-    # ---- Control actions ----
     if reset_session:
         st.session_state.running = False
         st.session_state.roast_active = False
         st.session_state.end_confirm_pending = False
         st.session_state.start_epoch = None
         st.session_state.last_sample_epoch = 0.0
+        st.session_state.next_sample_due_epoch = None
         st.session_state.last_ocr_epoch = 0.0
         st.session_state.last_capture_epoch = 0.0
+        st.session_state.last_ui_rerun_epoch = 0.0
         st.session_state.live_frame = None
         st.session_state.live_roi = None
         st.session_state.capture_buffer = []
         st.session_state.last_ocr_frame = None
         st.session_state.last_ocr_roi = None
-        st.session_state.pending_ocr = None
+        st.session_state.current_window_reads = []
+        st.session_state.last_confirmed_current = None
         st.session_state.samples = []
         st.session_state.events = []
         st.session_state.set_temp = None
@@ -1040,12 +1102,10 @@ def main():
         st.session_state._clear_roast_notes_on_rerun = True
         st.rerun()
 
-    # Apply set temp immediately when "Apply" button is pressed, even if not currently running. This allows the classifier to use the updated set temp for its logic right away.
     if apply_set:
         prev_set_temp = st.session_state.set_temp
         st.session_state.set_temp = new_set_temp
         st.session_state.set_temp_is_applied = new_set_temp > 0
-        # Event marker
         if st.session_state.roast_active and st.session_state.start_epoch is not None:
             st.session_state.events.append(
                 {
@@ -1056,7 +1116,6 @@ def main():
                 }
             )
 
-    # Start logging: initialize state, open camera, and add initial sample with set temp as current temp (x=0 anchor)
     if start_btn:
         requested_roi = (int(roi_x), int(roi_y), int(roi_w), int(roi_h))
         if st.session_state.preview_camera:
@@ -1067,15 +1126,18 @@ def main():
         st.session_state.running = True
         st.session_state.end_confirm_pending = False
         st.session_state.start_epoch = time.time()
-        st.session_state.last_sample_epoch = 0.0
+        st.session_state.last_sample_epoch = st.session_state.start_epoch
+        st.session_state.next_sample_due_epoch = st.session_state.start_epoch + SAMPLE_INTERVAL_SEC
         st.session_state.last_ocr_epoch = 0.0
         st.session_state.last_capture_epoch = 0.0
+        st.session_state.last_ui_rerun_epoch = 0.0
         st.session_state.live_frame = None
         st.session_state.live_roi = None
         st.session_state.capture_buffer = []
         st.session_state.last_ocr_frame = None
         st.session_state.last_ocr_roi = None
-        st.session_state.pending_ocr = None
+        st.session_state.current_window_reads = []
+        st.session_state.last_confirmed_current = None
         st.session_state.samples = []
         st.session_state.events = []
         st.session_state.classifier = TempClassifier()
@@ -1086,7 +1148,6 @@ def main():
         st.session_state.final_total_roast_time = ""
         st.session_state.end_confirm_prev_running = False
 
-        # Add initial point at x=0 with set temp (as you wanted)
         init_result = st.session_state.classifier.force_initial(set_temp=new_set_temp)
         add_sample(0.0, raw_read=new_set_temp, result=init_result)
 
@@ -1208,9 +1269,7 @@ def main():
                 if raw_w > 0 and roasted_w > 0:
                     loss_g = raw_w - roasted_w
                     loss_pct = (loss_g / raw_w) * 100.0
-                    st.success(
-                        f"Saved roast: {meta.roast_id} | Weight loss: {loss_g:.1f} g ({loss_pct:.1f}%)"
-                    )
+                    st.success(f"Saved roast: {meta.roast_id} | Weight loss: {loss_g:.1f} g ({loss_pct:.1f}%)")
                 else:
                     st.success(f"Saved roast: {meta.roast_id}")
                 st.rerun()
@@ -1248,12 +1307,12 @@ def main():
         except Exception as e:
             st.sidebar.warning(f"Could not load latest roast meta for weight update: {e}")
 
-    # Shared active-roast capture stream: one camera read feeds monitor + buffered OCR.
     if st.session_state.roast_active and st.session_state.camera is not None:
         now_capture = time.time()
-        capture_interval = max(0.03, float(st.session_state.get("active_monitor_refresh_sec", PREVIEW_REFRESH_SEC)))
+        capture_interval = max(0.04, float(st.session_state.get("active_monitor_refresh_sec", PREVIEW_REFRESH_SEC)))
         if st.session_state.running and (not st.session_state.end_confirm_pending):
             capture_interval = min(capture_interval, 0.05)
+
         if (
             (now_capture - float(st.session_state.get("last_capture_epoch", 0.0))) >= capture_interval
             or st.session_state.get("live_frame") is None
@@ -1265,16 +1324,14 @@ def main():
                 st.session_state.live_frame = frame
                 st.session_state.live_roi = roi
                 st.session_state.capture_buffer.append({"ts": now_capture, "frame": frame, "roi": roi})
-                # Keep a short rolling window for OCR consensus.
                 if len(st.session_state.capture_buffer) > 180:
                     st.session_state.capture_buffer = st.session_state.capture_buffer[-180:]
 
-    # ---- Main layout ----
     left, right = st.columns([4.0, 0.8])
 
-    #-- Live plot on the left, camera feed and debug info on the right --
     with left:
         st.subheader("Live plot")
+        render_live_timer()
         plotter = RoastPlotter(xmax_sec=PLOT_WINDOW_SEC)
 
         df = pd.DataFrame(st.session_state.samples) if st.session_state.samples else pd.DataFrame(
@@ -1289,7 +1346,6 @@ def main():
         else:
             plot_df = df
 
-        # Reference curve underlay — only shown while roast is active (acts as a guide)
         ref_df = None
         ref_events_overlay: list[dict] = []
         if st.session_state.roast_active and st.session_state.reference_roast_id:
@@ -1321,10 +1377,8 @@ def main():
                     t_sec = float(e.get("t_sec", 0.0))
                     to_temp = e.get("value")
                     from_temp = e.get("from_value")
-
                     if to_temp is None:
                         continue
-
                     change_text = f"{to_temp} F" if from_temp is None else f"{from_temp} -> {to_temp} F"
                     schedule_rows.append(
                         {
@@ -1351,13 +1405,9 @@ def main():
 
         phase_stats = _compute_phase_stats(st.session_state.events, phase_elapsed)
         p1, p2, p3, p4 = st.columns(4)
-        for column, (label, (pct, secs)) in zip(
-            [p1, p2, p3, p4],
-            phase_stats.items(),
-        ):
+        for column, (label, (pct, secs)) in zip([p1, p2, p3, p4], phase_stats.items()):
             column.metric(label, f"{pct:.1f}%", _format_mmss(secs))
 
-        # Stage markers: unlock sequentially and allow one click each.
         yellow_evt = next((e for e in st.session_state.events if e.get("type") == "yellowing_start"), None)
         browning_evt = next((e for e in st.session_state.events if e.get("type") == "browning_start"), None)
         crack_evt = next((e for e in st.session_state.events if e.get("type") == "first_crack"), None)
@@ -1402,33 +1452,27 @@ def main():
             st.rerun()
 
         if not df.empty and "temp_current" in df.columns:
-            editable = df.dropna(subset=["temp_current"]).copy()
-            if not editable.empty:
-                editable["enabled"] = ~editable["point_id"].isin(disabled_ids)
-                editable["time"] = editable["t_sec"].apply(
-                    lambda t: f"{int(t // 60)}:{int(t % 60):02d}"
-                )
-                # temp_current is already in Fahrenheit; do not convert again.
-                editable["temp_f"] = editable["temp_current"].astype(float).round(1)
+            with st.expander("Point editor", expanded=False):
+                editable = df.dropna(subset=["temp_current"]).copy()
+                if not editable.empty:
+                    editable["enabled"] = ~editable["point_id"].isin(disabled_ids)
+                    editable["time"] = editable["t_sec"].apply(lambda t: f"{int(t // 60)}:{int(t % 60):02d}")
+                    editable["temp_f"] = editable["temp_current"].astype(float).round(1)
 
-                st.caption("Toggle points off to remove inaccurate reads from the curve.")
-                edited = st.data_editor(
-                    editable[["enabled", "time", "temp_f", "point_id"]],
-                    hide_index=True,
-                    width="stretch",
-                    disabled=["time", "temp_f", "point_id"],
-                    column_config={"enabled": st.column_config.CheckboxColumn("Use point")},
-                    key="point_toggle_editor",
-                )
+                    st.caption("Toggle points off to remove inaccurate reads from the curve.")
+                    edited = st.data_editor(
+                        editable[["enabled", "time", "temp_f", "point_id"]],
+                        hide_index=True,
+                        width="stretch",
+                        disabled=["time", "temp_f", "point_id"],
+                        column_config={"enabled": st.column_config.CheckboxColumn("Use point")},
+                        key="point_toggle_editor",
+                    )
 
-                new_disabled = set(
-                    edited.loc[~edited["enabled"], "point_id"].astype(int).tolist()
-                )
-                if new_disabled != disabled_ids:
-                    st.session_state.disabled_point_ids = sorted(new_disabled)
-                    st.rerun()
-
-        # st.caption("Tip: if OCR is noisy, we’ll add sanity filters + consecutive-read logic in classifier.py.")
+                    new_disabled = set(edited.loc[~edited["enabled"], "point_id"].astype(int).tolist())
+                    if new_disabled != disabled_ids:
+                        st.session_state.disabled_point_ids = sorted(new_disabled)
+                        st.rerun()
 
     with right:
         st.subheader("Camera / Debug")
@@ -1437,7 +1481,7 @@ def main():
             live_preview = st.checkbox("Live preview", value=bool(st.session_state.get("preview_live", False)), key="preview_live")
             preview_refresh = st.slider(
                 "Preview refresh (sec)",
-                min_value=0.03,
+                min_value=0.02,
                 max_value=0.50,
                 value=float(st.session_state.get("preview_refresh_sec", PREVIEW_REFRESH_SEC)),
                 step=0.01,
@@ -1447,11 +1491,7 @@ def main():
             requested_index = int(cam_index)
             requested_roi = (int(roi_x), int(roi_y), int(roi_w), int(roi_h))
 
-            # Keep preview camera open across reruns so stream is smoother.
-            if (
-                st.session_state.preview_camera is None
-                or st.session_state.preview_cam_index != requested_index
-            ):
+            if st.session_state.preview_camera is None or st.session_state.preview_cam_index != requested_index:
                 if st.session_state.preview_camera:
                     try:
                         st.session_state.preview_camera.close()
@@ -1461,7 +1501,6 @@ def main():
                 st.session_state.preview_cam_index = requested_index
                 st.session_state.preview_roi = requested_roi
             elif st.session_state.preview_roi != requested_roi:
-                # Apply ROI changes without reopening the camera device.
                 st.session_state.preview_camera.roi = requested_roi
                 st.session_state.preview_roi = requested_roi
 
@@ -1470,7 +1509,6 @@ def main():
             if frame is None:
                 st.error("Could not read from camera. Try a different camera index.")
             else:
-                # Draw the ROI rectangle on full frame so clipping can be tuned before start.
                 x, y, w, h = int(roi_x), int(roi_y), int(roi_w), int(roi_h)
                 h_frame, w_frame = frame.shape[:2]
                 x = max(0, min(x, w_frame - 1))
@@ -1485,8 +1523,7 @@ def main():
                 st.image(roi, channels="BGR", caption="ROI preview (what OCR reads)", width=300)
 
             if live_preview:
-                time.sleep(float(preview_refresh))
-                st.rerun()
+                _throttled_rerun(max(0.02, float(preview_refresh)))
         else:
             if st.session_state.preview_camera:
                 try:
@@ -1502,9 +1539,9 @@ def main():
                 value=bool(st.session_state.get("active_monitor_live", True)),
                 key="active_monitor_live",
             )
-            monitor_refresh = st.slider(
+            st.slider(
                 "Monitor refresh (sec)",
-                min_value=0.03,
+                min_value=0.02,
                 max_value=0.50,
                 value=float(st.session_state.get("active_monitor_refresh_sec", PREVIEW_REFRESH_SEC)),
                 step=0.01,
@@ -1515,8 +1552,9 @@ def main():
             monitor_frame = st.session_state.get("live_frame") if monitor_live else None
             monitor_roi = st.session_state.get("live_roi") if monitor_live else None
 
-            frame = st.session_state.get("last_ocr_frame")
-            roi = st.session_state.get("last_ocr_roi")
+            frame = st.session_state.get("live_frame")
+            roi = st.session_state.get("live_roi")
+
             if monitor_frame is not None and monitor_roi is not None:
                 x, y, w, h = int(roi_x), int(roi_y), int(roi_w), int(roi_h)
                 h_frame, w_frame = monitor_frame.shape[:2]
@@ -1550,13 +1588,13 @@ def main():
 
         st.subheader("Latest readings")
         if not df.empty:
-            st.write(df.tail(10))
+            if st.session_state.roast_active:
+                st.dataframe(df.tail(5), width="stretch", hide_index=True)
+            else:
+                st.write(df.tail(10))
         else:
             st.write("No samples yet.")
 
-    # ---- Sampling loop (run on rerun ticks) ----
-    # Streamlit isn't a real-time loop; we re-run the script.
-    # We'll "tick" by sleeping a tiny bit when running.
     if (
         st.session_state.running
         and st.session_state.roast_active
@@ -1566,12 +1604,9 @@ def main():
         now = time.time()
         elapsed = current_elapsed_sec()
 
-        # Stop if we hit the fixed graph window
         if elapsed >= PLOT_WINDOW_SEC:
             st.session_state.running = False
 
-        # Run OCR every 1s so the classifier sees the display alternating
-        # between set-temp and current-temp modes
         if now - st.session_state.last_ocr_epoch >= OCR_READ_INTERVAL_SEC:
             prev_ocr_epoch = float(st.session_state.last_ocr_epoch)
             st.session_state.last_ocr_epoch = now
@@ -1587,8 +1622,14 @@ def main():
                 if live_frame is not None and live_roi is not None:
                     buffer_items = [{"ts": now, "frame": live_frame, "roi": live_roi}]
 
-            # Use only the most recent few frames to keep OCR load bounded.
-            buffer_items = buffer_items[-6:]
+            buffer_items = buffer_items[-1:]
+
+            if buffer_items:
+                newest_item = buffer_items[-1]
+                newest_frame = newest_item.get("frame")
+                newest_roi = newest_item.get("roi")
+                st.session_state.last_ocr_frame = newest_frame.copy() if newest_frame is not None else None
+                st.session_state.last_ocr_roi = newest_roi.copy() if newest_roi is not None else None
 
             value_scores: dict[int, float] = {}
             value_best_conf: dict[int, float] = {}
@@ -1596,7 +1637,11 @@ def main():
 
             for item in buffer_items:
                 roi_img = item.get("roi")
-                raw_candidate, conf_candidate = read_temperature_from_frame(roi_img)
+                ocr_result = read_temperature_from_frame(roi_img)
+                if not isinstance(ocr_result, tuple) or len(ocr_result) != 2:
+                    continue
+
+                raw_candidate, conf_candidate = ocr_result
                 if raw_candidate is None:
                     continue
 
@@ -1609,6 +1654,7 @@ def main():
             if value_scores:
                 raw_read = max(value_scores, key=lambda k: value_scores[k])
                 conf = min(1.0, max(0.0, value_best_conf.get(raw_read, 0.0)))
+
                 chosen_item = value_best_item.get(raw_read)
                 if chosen_item is not None:
                     chosen_frame = chosen_item.get("frame")
@@ -1619,6 +1665,10 @@ def main():
                 raw_read = None
                 conf = 0.0
 
+            if raw_read is None or conf < 0.30:
+                raw_read = None
+                conf = 0.0
+
             result = st.session_state.classifier.update(
                 set_temp=st.session_state.set_temp,
                 raw_read=raw_read,
@@ -1626,39 +1676,121 @@ def main():
                 t_sec=elapsed,
             )
 
-            # Buffer the read only if it's a confirmed current-temp display
             if result.view_mode == "CURRENT_VIEW" and result.current_temp is not None:
-                st.session_state.pending_ocr = {"raw_read": raw_read, "result": result}
+                st.session_state.current_window_reads.append(
+                    {
+                        "temp": int(result.current_temp),
+                        "raw_read": int(raw_read) if raw_read is not None else int(result.current_temp),
+                        "conf": float(conf),
+                        "t_sec": float(elapsed),
+                    }
+                )
 
-        # Every 5s, commit one buffered current-temp point to the plot.
-        # If the display was stuck on set-temp the whole window, skip — don't plot noise.
-        if now - st.session_state.last_sample_epoch >= SAMPLE_INTERVAL_SEC:
-            st.session_state.last_sample_epoch = now
+        while (
+            st.session_state.next_sample_due_epoch is not None
+            and now >= st.session_state.next_sample_due_epoch
+        ):
+            sample_elapsed = float(st.session_state.next_sample_due_epoch - st.session_state.start_epoch)
+            st.session_state.last_sample_epoch = st.session_state.next_sample_due_epoch
 
-            if st.session_state.pending_ocr is not None:
-                p = st.session_state.pending_ocr
-                add_sample(elapsed, raw_read=p["raw_read"], result=p["result"])
-                st.session_state.pending_ocr = None
+            voted = _resolve_window_vote(
+                st.session_state.current_window_reads,
+                window_end_t_sec=sample_elapsed,
+                cluster_tol=2,
+            )
 
-            # Drop stale buffered frames to avoid unbounded growth.
-            buffer_keep_sec = max(10.0, float(SAMPLE_INTERVAL_SEC) * 2.0)
-            cutoff_ts = now - buffer_keep_sec
-            st.session_state.capture_buffer = [
-                item for item in st.session_state.capture_buffer if float(item.get("ts", 0.0)) >= cutoff_ts
-            ]
+            if voted is None:
+                last_good = st.session_state.get("last_confirmed_current")
+                if last_good is not None:
+                    age_sec = sample_elapsed - float(last_good.get("t_sec", 0.0))
+                    if age_sec <= 10.0:
+                        voted = {
+                            "temp": int(last_good["temp"]),
+                            "raw_read": int(last_good["raw_read"]),
+                            "conf": float(last_good["conf"]),
+                        }
 
-        # Gentle tick to keep UI responsive
-        time.sleep(0.05)
-        st.rerun()
+            if voted is not None:
+                commit_result = ClassifierResult(
+                    view_mode="CURRENT_VIEW",
+                    current_temp=int(voted["temp"]),
+                    set_temp=st.session_state.set_temp,
+                    confidence=float(voted["conf"]),
+                )
+                add_sample(sample_elapsed, raw_read=int(voted["raw_read"]), result=commit_result)
+
+                st.session_state.last_confirmed_current = {
+                    "temp": int(voted["temp"]),
+                    "raw_read": int(voted["raw_read"]),
+                    "conf": float(voted["conf"]),
+                    "t_sec": float(sample_elapsed),
+                }
+
+            st.session_state.current_window_reads = []
+            st.session_state.next_sample_due_epoch += SAMPLE_INTERVAL_SEC
+
+        buffer_keep_sec = max(10.0, float(SAMPLE_INTERVAL_SEC) * 2.0)
+        cutoff_ts = now - buffer_keep_sec
+        st.session_state.capture_buffer = [
+            item for item in st.session_state.capture_buffer if float(item.get("ts", 0.0)) >= cutoff_ts
+        ]
+
+        _throttled_rerun(UI_RERUN_SEC)
+
     elif (
         st.session_state.roast_active
         and st.session_state.camera is not None
         and bool(st.session_state.get("active_monitor_live", True))
     ):
-        # Keep monitor view responsive while paused or waiting.
-        time.sleep(float(st.session_state.get("active_monitor_refresh_sec", PREVIEW_REFRESH_SEC)))
-        st.rerun()
+        _throttled_rerun(max(0.02, float(st.session_state.get("active_monitor_refresh_sec", PREVIEW_REFRESH_SEC))))
 
+def render_live_timer():
+    start_epoch = st.session_state.get("start_epoch", None)
+    roast_active = bool(st.session_state.get("roast_active", False))
+    running = bool(st.session_state.get("running", False))
+    end_confirm_pending = bool(st.session_state.get("end_confirm_pending", False))
+
+    if not roast_active or start_epoch is None:
+        st.markdown(
+            "<div style='color: #FFFFFF; font-weight: 600; font-size: 1.35rem;'>Elapsed time: 0:00</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    paused_elapsed = current_elapsed_sec()
+    paused_mm = int(paused_elapsed // 60)
+    paused_ss = int(paused_elapsed % 60)
+
+    if (not running) or end_confirm_pending:
+        st.markdown(
+            f"<div style='color: #FFFFFF; font-weight: 600; font-size: 1.35rem;'>Elapsed time: {paused_mm}:{paused_ss:02d}</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    st.components.v1.html(
+        f"""
+        <div id="live-roast-timer" style="font-size: 1.35rem; font-weight: 600; margin-bottom: 0.5rem; color: #FFFFFF;">
+            Elapsed time: 0:00
+        </div>
+        <script>
+        const startEpoch = {float(start_epoch)};
+        const timerEl = document.getElementById("live-roast-timer");
+
+        function updateTimer() {{
+            const nowSec = Date.now() / 1000.0;
+            const elapsed = Math.max(0, nowSec - startEpoch);
+            const mm = Math.floor(elapsed / 60);
+            const ss = Math.floor(elapsed % 60);
+            timerEl.textContent = "Elapsed time: " + mm + ":" + String(ss).padStart(2, "0");
+        }}
+
+        updateTimer();
+        setInterval(updateTimer, 200);
+        </script>
+        """,
+        height=48,
+    )
 
 if __name__ == "__main__":
     main()
