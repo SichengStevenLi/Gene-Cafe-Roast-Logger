@@ -1,87 +1,75 @@
-import time
-import platform
 import cv2
-from typing import Tuple
 
-# takes image from cv2.VideoCapture and crops to ROI
-# feeds the result to ocr.py to identify temperature digits
 class Camera:
-    """
-    Simple camera reader with a fixed ROI crop.
-    roi = (x, y, w, h) in pixels, relative to the full frame.
-    """
-    def __init__(self, index: int = 0, roi: Tuple[int, int, int, int] = (0, 0, 320, 180)):
-        self.index = int(index)
+    def __init__(self, index=0, roi=(0, 0, 100, 100)):
+        self.index = index
         self.roi = roi
-        self.cap = None
-        self._open_capture()
 
-    def _backend_candidates(self):
-        if platform.system().lower() == "darwin":
-            avf = getattr(cv2, "CAP_AVFOUNDATION", None)
-            if avf is not None:
-                return [avf, cv2.CAP_ANY]
-        return [cv2.CAP_ANY]
+        self.cap = cv2.VideoCapture(index, cv2.CAP_AVFOUNDATION)
 
-    def _open_capture(self):
-        if self.cap is not None:
-            try:
-                self.cap.release()
-            except Exception:
-                pass
-            self.cap = None
+        if not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(index, cv2.CAP_ANY)
 
-        for backend in self._backend_candidates():
-            cap = cv2.VideoCapture(self.index, backend)
-            if not cap.isOpened():
-                cap.release()
-                continue
+        try:
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
 
-            # Small capture buffer helps reduce stale/laggy frames.
-            try:
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            except Exception:
-                pass
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-            self.cap = cap
-            return
+        # Try to reduce auto-brightening / bloom.
+        # Some webcams ignore some of these, but they are worth trying.
+        try:
+            self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+        except Exception:
+            pass
+
+        try:
+            self.cap.set(cv2.CAP_PROP_EXPOSURE, -8)
+        except Exception:
+            pass
+
+        try:
+            self.cap.set(cv2.CAP_PROP_GAIN, 0)
+        except Exception:
+            pass
+
+        try:
+            self.cap.set(cv2.CAP_PROP_BRIGHTNESS, 0)
+        except Exception:
+            pass
+
+        # Warm up camera a bit
+        for _ in range(8):
+            self.cap.read()
 
     def read(self):
         if self.cap is None or not self.cap.isOpened():
-            self._open_capture()
-            if self.cap is None or not self.cap.isOpened():
+            return None, None
+
+        # Flush buffered frames so we work on the newest image.
+        for _ in range(3):
+            self.cap.grab()
+
+        ok, frame = self.cap.retrieve()
+        if not ok or frame is None:
+            ok, frame = self.cap.read()
+            if not ok or frame is None:
                 return None, None
 
-        ok, frame = self.cap.read()
-        if (not ok) or (frame is None):
-            # Recover once by reopening the device.
-            self._open_capture()
-            if self.cap is None or not self.cap.isOpened():
-                return None, None
-
-            # Some cameras need a short warmup after reopen.
-            for _ in range(2):
-                ok, frame = self.cap.read()
-                if ok and frame is not None:
-                    break
-                time.sleep(0.03)
-
-            if (not ok) or (frame is None):
-                return None, None
-
-        x, y, w, h = self.roi 
+        x, y, w, h = self.roi
         h_frame, w_frame = frame.shape[:2]
 
-        # Clamp ROI safely
-        x = max(0, min(x, w_frame - 1))
-        y = max(0, min(y, h_frame - 1))
-        w = max(1, min(w, w_frame - x))
-        h = max(1, min(h, h_frame - y))
+        x = max(0, min(int(x), w_frame - 1))
+        y = max(0, min(int(y), h_frame - 1))
+        w = max(1, min(int(w), w_frame - x))
+        h = max(1, min(int(h), h_frame - y))
 
-        roi = frame[y:y+h, x:x+w].copy()
+        roi = frame[y:y + h, x:x + w].copy()
         return frame, roi
 
     def close(self):
-        if self.cap:
+        if self.cap is not None:
             self.cap.release()
             self.cap = None
