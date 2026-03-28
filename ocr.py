@@ -1,202 +1,239 @@
 from __future__ import annotations
-import importlib
+
 import cv2
 import numpy as np
 
-_PYTESSERACT = None
 
-
-def _get_pytesseract():
-    global _PYTESSERACT
-    if _PYTESSERACT is None:
-        try:
-            _PYTESSERACT = importlib.import_module("pytesseract")
-        except Exception:
-            _PYTESSERACT = False
-    return _PYTESSERACT if _PYTESSERACT is not False else None
+SEGMENT_MAP: dict[int, set[str]] = {
+    0: set("ABCDEF"),
+    1: set("BC"),
+    2: set("ABDEG"),
+    3: set("ABCDG"),
+    4: set("BCFG"),
+    5: set("ACDFG"),
+    6: set("ACDEFG"),
+    7: set("ABC"),
+    8: set("ABCDEFG"),
+    9: set("ABCDFG"),
+}
 
 
 def get_ocr_status() -> tuple[bool, str]:
-    pytesseract = _get_pytesseract()
-    if pytesseract is None:
-        return (
-            False,
-            "OCR disabled: Python package 'pytesseract' is not installed.",
-        )
-
-    try:
-        _ = pytesseract.get_tesseract_version()
-    except Exception:
-        return (
-            False,
-            "OCR disabled: Tesseract binary is not installed or not on PATH. "
-            "On macOS run: brew install tesseract",
-        )
-
-    return True, "OCR ready"
+    return True, "Strict seven-segment decoder ready"
 
 
-def _add_border(img: np.ndarray, border: int = 12, value: int = 255) -> np.ndarray:
-    return cv2.copyMakeBorder(
-        img,
-        border,
-        border,
-        border,
-        border,
-        cv2.BORDER_CONSTANT,
-        value=value,
-    )
+def _crop_inner(img: np.ndarray, frac_x: float, frac_y: float) -> np.ndarray:
+    h, w = img.shape[:2]
+    mx = max(1, int(w * frac_x))
+    my = max(1, int(h * frac_y))
+    if (w - 2 * mx) < 20 or (h - 2 * my) < 20:
+        return img
+    return img[my : h - my, mx : w - mx]
 
 
-def _percentile_normalize(gray: np.ndarray) -> np.ndarray:
-    p1 = np.percentile(gray, 1)
-    p99 = np.percentile(gray, 99)
-    if p99 <= p1:
-        return gray
-    scaled = (gray.astype(np.float32) - p1) * (255.0 / (p99 - p1))
-    return np.clip(scaled, 0, 255).astype(np.uint8)
-
-
-def _gamma_adjust(img: np.ndarray, gamma: float) -> np.ndarray:
-    gamma = max(0.1, float(gamma))
-    table = np.array([((i / 255.0) ** gamma) * 255 for i in range(256)], dtype=np.uint8)
-    return cv2.LUT(img, table)
-
-
-def _trim_roi(gray: np.ndarray) -> np.ndarray:
-    h, w = gray.shape[:2]
-    if h < 20 or w < 20:
-        return gray
-
-    x_pad = max(1, int(w * 0.04))
-    y_pad = max(1, int(h * 0.08))
-    x2 = max(x_pad + 1, w - x_pad)
-    y2 = max(y_pad + 1, h - y_pad)
-    return gray[y_pad:y2, x_pad:x2]
-
-
-def _prepare_ocr_variants(roi_bgr) -> list[np.ndarray]:
+def _extract_display_window(roi_bgr: np.ndarray) -> np.ndarray:
     if roi_bgr is None or roi_bgr.size == 0:
-        return []
+        return roi_bgr
 
-    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
-    gray = _trim_roi(gray)
-    gray = cv2.resize(gray, None, fx=4.0, fy=4.0, interpolation=cv2.INTER_CUBIC)
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-    gray = _percentile_normalize(gray)
+    img = _crop_inner(roi_bgr, frac_x=0.02, frac_y=0.03)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
+    # Keep anything that is not plain white border.
+    keep = (gray < 245).astype(np.uint8) * 255
+    keep = cv2.morphologyEx(keep, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
 
-    # Exposure rescue variants:
-    # gamma > 1 darkens bright blown highlights
-    # gamma < 1 brightens darker digits
-    darker = _gamma_adjust(enhanced, 2.2)
-    brighter = _gamma_adjust(enhanced, 0.8)
+    contours, _ = cv2.findContours(keep, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return img
 
-    kernel_emphasis = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-    bright_segments = cv2.morphologyEx(darker, cv2.MORPH_TOPHAT, kernel_emphasis)
-    dark_segments = cv2.morphologyEx(brighter, cv2.MORPH_BLACKHAT, kernel_emphasis)
+    c = max(contours, key=cv2.contourArea)
+    x, y, w, h = cv2.boundingRect(c)
+    if w * h < 0.35 * img.shape[0] * img.shape[1]:
+        return img
 
-    base_images = [
-        enhanced,
-        darker,
-        brighter,
-        bright_segments,
-        dark_segments,
-    ]
-
-    variants: list[np.ndarray] = []
-    for base in base_images:
-        bin_otsu = cv2.threshold(base, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-        bin_otsu_inv = cv2.threshold(base, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
-        bin_adapt = cv2.adaptiveThreshold(
-            base, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 4
-        )
-        bin_adapt_inv = cv2.adaptiveThreshold(
-            base, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 4
-        )
-
-        for img in [bin_otsu, bin_otsu_inv, bin_adapt, bin_adapt_inv]:
-            img = cv2.medianBlur(img, 3)
-            img = _add_border(img, 12, 255)
-            variants.append(img)
-
-    return variants
+    display = img[y : y + h, x : x + w]
+    # Remove the white outer frame more aggressively.
+    return _crop_inner(display, frac_x=0.03, frac_y=0.08)
 
 
-def read_temperature_from_frame(roi_bgr) -> tuple[int | None, float]:
-    if roi_bgr is None:
+def _digit_boxes(display_bgr: np.ndarray) -> list[tuple[int, int]]:
+    """
+    Fixed three-digit split. This is more stable for your display than trying to
+    infer separators from glare.
+    """
+    h, w = display_bgr.shape[:2]
+    boxes: list[tuple[int, int]] = []
+
+    for i in range(3):
+        cx = (i + 0.5) * w / 3.0
+        half = 0.145 * w
+        x0 = int(max(0, cx - half))
+        x1 = int(min(w, cx + half))
+        boxes.append((x0, x1))
+
+    return boxes
+
+
+def _hot_map(digit_bgr: np.ndarray) -> np.ndarray:
+    """
+    Build a 'lit segment' map.
+    Lit segments are usually bright and relatively desaturated compared to the tan/off segments.
+    """
+    hsv = cv2.cvtColor(digit_bgr, cv2.COLOR_BGR2HSV)
+    s = hsv[:, :, 1].astype(np.float32) / 255.0
+    v = hsv[:, :, 2].astype(np.float32) / 255.0
+
+    # White-hot LED tends to have high V and lower S than the beige/off segments.
+    hot = np.clip(v - 0.72 * s, 0.0, 1.0)
+
+    bg = float(np.percentile(hot, 30))
+    hot = np.clip(hot - bg, 0.0, 1.0)
+
+    mx = float(hot.max())
+    if mx > 1e-6:
+        hot = hot / mx
+
+    # Slight gamma to suppress weak glow.
+    hot = hot ** 1.15
+    return hot
+
+
+def _segment_scores(digit_bgr: np.ndarray) -> dict[str, float]:
+    hot = _hot_map(digit_bgr)
+    h, w = hot.shape[:2]
+
+    # Narrower windows reduce bleed from neighboring segments.
+    rects = {
+        "A": (0.25, 0.06, 0.75, 0.15),
+        "B": (0.69, 0.16, 0.84, 0.42),
+        "C": (0.69, 0.53, 0.84, 0.79),
+        "D": (0.25, 0.79, 0.75, 0.90),
+        "E": (0.13, 0.53, 0.28, 0.79),
+        "F": (0.13, 0.16, 0.28, 0.42),
+        "G": (0.25, 0.43, 0.75, 0.57),
+    }
+
+    scores: dict[str, float] = {}
+    for seg, (x0f, y0f, x1f, y1f) in rects.items():
+        x0 = int(x0f * w)
+        x1 = int(x1f * w)
+        y0 = int(y0f * h)
+        y1 = int(y1f * h)
+
+        roi = hot[y0:y1, x0:x1]
+        if roi.size == 0:
+            scores[seg] = 0.0
+            continue
+
+        # 75th percentile works better here than mean because the segment glow is uneven.
+        scores[seg] = float(np.percentile(roi, 75))
+
+    return scores
+
+
+def _digit_candidate_scores(seg: dict[str, float]) -> dict[int, float]:
+    scores: dict[int, float] = {}
+    on_threshold = 0.58
+
+    for digit, expected_on in SEGMENT_MAP.items():
+        expected_off = set("ABCDEFG") - expected_on
+
+        on_scores = np.array([seg[s] for s in expected_on], dtype=np.float32)
+        off_scores = np.array([seg[s] for s in expected_off], dtype=np.float32) if expected_off else np.array([0.0], dtype=np.float32)
+
+        on_mean = float(on_scores.mean()) if on_scores.size else 0.0
+        off_mean = float(off_scores.mean()) if off_scores.size else 0.0
+
+        on_hits = float((on_scores > on_threshold).mean()) if on_scores.size else 0.0
+        off_hits = float((off_scores > on_threshold).mean()) if off_scores.size else 0.0
+
+        score = 1.40 * on_mean - 1.00 * off_mean + 0.35 * (on_hits - off_hits)
+
+        # Extra digit-specific penalties to avoid false 8/0/1/7 reads.
+        if digit == 8:
+            # 8 should have all segments convincingly on.
+            score -= 1.60 * max(0.0, 0.68 - float(on_scores.min()))
+        elif digit == 0:
+            # 0 should not have middle bar strong.
+            score -= 1.20 * seg["G"]
+        elif digit == 4:
+            # 4 should not have strong top or bottom bars.
+            score -= 0.70 * max(0.0, seg["A"] - 0.35)
+            score -= 0.70 * max(0.0, seg["D"] - 0.35)
+        elif digit == 1:
+            # 1 should not strongly light many other segments.
+            score -= 0.90 * (seg["A"] + seg["D"] + seg["E"] + seg["F"] + seg["G"]) / 5.0
+        elif digit == 7:
+            # 7 should not look like a fully formed lower half.
+            score -= 0.80 * (seg["D"] + seg["E"] + seg["F"] + seg["G"]) / 4.0
+
+        scores[digit] = float(score)
+
+    return scores
+
+
+def _decode_digit(digit_bgr: np.ndarray) -> tuple[int | None, float]:
+    seg = _segment_scores(digit_bgr)
+    cand = _digit_candidate_scores(seg)
+
+    ranked = sorted(cand.items(), key=lambda kv: kv[1], reverse=True)
+    if len(ranked) < 2:
         return None, 0.0
 
-    ocr_ready, _ = get_ocr_status()
-    if not ocr_ready:
+    best_digit, best_score = ranked[0]
+    second_digit, second_score = ranked[1]
+
+    gap = float(best_score - second_score)
+
+    # Reject very ambiguous digits instead of forcing a wrong answer.
+    if gap < 0.12:
         return None, 0.0
 
-    pytesseract = _get_pytesseract()
-    if pytesseract is None:
+    # Also reject if the best candidate itself is weak.
+    if best_score < 0.22:
         return None, 0.0
 
-    variants = _prepare_ocr_variants(roi_bgr)
-    if not variants:
+    conf = float(np.clip(0.35 + 2.6 * gap, 0.0, 1.0))
+    return int(best_digit), conf
+
+
+def read_temperature_from_frame(roi_bgr: np.ndarray) -> tuple[int | None, float]:
+    if roi_bgr is None or roi_bgr.size == 0:
         return None, 0.0
 
-    best_value: int | None = None
-    best_conf = 0.0
-
-    configs = [
-        "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789",
-        "--oem 3 --psm 8 -c tessedit_char_whitelist=0123456789",
-    ]
-
-    for img in variants:
-        for cfg in configs:
-            try:
-                data = pytesseract.image_to_data(
-                    img,
-                    output_type=pytesseract.Output.DICT,
-                    config=cfg,
-                )
-            except Exception:
-                continue
-
-            texts = data.get("text", [])
-            confs = data.get("conf", [])
-
-            for txt, conf_raw in zip(texts, confs):
-                token = "".join(ch for ch in str(txt) if ch.isdigit())
-
-                # Only accept exact 3-digit readings.
-                if len(token) != 3:
-                    continue
-
-                try:
-                    value = int(token)
-                except ValueError:
-                    continue
-
-                # Plausible roast display range.
-                if value < 100 or value > 550:
-                    continue
-
-                try:
-                    conf = float(conf_raw)
-                except (TypeError, ValueError):
-                    continue
-
-                if conf <= 0:
-                    continue
-
-                conf01 = max(0.0, min(1.0, conf / 100.0))
-
-                if conf01 > best_conf:
-                    best_conf = conf01
-                    best_value = value
-
-                    if conf01 >= 0.94:
-                        return best_value, best_conf
-
-    if best_value is None:
+    display = _extract_display_window(roi_bgr)
+    if display is None or display.size == 0:
         return None, 0.0
 
-    return best_value, best_conf
+    boxes = _digit_boxes(display)
+    if len(boxes) != 3:
+        return None, 0.0
+
+    digits: list[int] = []
+    confs: list[float] = []
+
+    for x0, x1 in boxes:
+        if x1 - x0 < 15:
+            return None, 0.0
+
+        digit_img = display[:, x0:x1]
+        digit, conf = _decode_digit(digit_img)
+        if digit is None:
+            return None, 0.0
+
+        digits.append(digit)
+        confs.append(conf)
+
+    value = int(digits[0] * 100 + digits[1] * 10 + digits[2])
+
+    # Hard sanity check for Gene Cafe temperatures.
+    if value < 100 or value > 550:
+        return None, 0.0
+
+    confidence = float(np.mean(confs)) if confs else 0.0
+
+    # Reject low-confidence whole-number reads too.
+    if confidence < 0.45:
+        return None, 0.0
+
+    return value, confidence
